@@ -10,7 +10,11 @@ main.o: main.cpp
 
 test: myprog
 	mkdir -p output
-	./myprog input/testcutF9477.mmappet input/filtered_precursors_with_nontrivial_ms2_44.mmappet output/tiny_test.mzml --run-id tiny
+	./myprog input/testcutF9477.mmappet output/tiny_test.mzml --precursors-dir input/filtered_precursors_with_nontrivial_ms2_44.mmappet --run-id tiny
+
+run: myprog
+	mkdir -p output
+	./myprog input/F9477.mmappet output/F9477.mzml
 
 clean:
 	rm -f *.o myprog

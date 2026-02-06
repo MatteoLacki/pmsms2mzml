@@ -59,18 +59,20 @@ static std::string fmt_float(double val, int max_decimals = 6) {
 // ─── main ───────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     // Parse CLI args
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--run-id NAME] [--zlib-level N]\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
-    std::filesystem::path precursors_dir = argv[2];
-    std::filesystem::path output_path = argv[3];
+    std::filesystem::path output_path = argv[2];
+    std::filesystem::path precursors_dir = pmsms_dir / "filtered_precursors_with_nontrivial_ms2.mmappet";
     std::string run_id = output_path.stem().string();
     int zlib_level = 1;
 
-    for (int i = 4; i < argc; i++) {
-        if (strcmp(argv[i], "--run-id") == 0 && i + 1 < argc) {
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--precursors-dir") == 0 && i + 1 < argc) {
+            precursors_dir = argv[++i];
+        } else if (strcmp(argv[i], "--run-id") == 0 && i + 1 < argc) {
             run_id = argv[++i];
         } else if (strcmp(argv[i], "--zlib-level") == 0 && i + 1 < argc) {
             zlib_level = atoi(argv[++i]);
@@ -167,12 +169,14 @@ int main(int argc, char** argv) {
     fprintf(out, "<spectrumList count=\"%zu\" defaultDataProcessingRef=\"python_conversion\">\n", n_spectra);
 
     // ─── Step 3: Write spectra ──────────────────────────────────────────
-    fprintf(stderr, "Writing %zu spectra...\n", n_spectra);
-
     // Temp buffers for float conversion
     std::vector<float> intensity_f32;
+    size_t progress_step = n_spectra < 100 ? 1 : n_spectra / 100;
 
     for (size_t i = 0; i < n_spectra; i++) {
+        if (i % progress_step == 0)
+            fprintf(stderr, "\rWriting spectra: %zu / %zu (%zu%%)", i, n_spectra, i * 100 / n_spectra);
+
         // Record byte offset
         spectrum_offsets.push_back(ftell(out));
 
@@ -280,6 +284,8 @@ int main(int argc, char** argv) {
         fprintf(out, "</binaryDataArrayList>\n");
         fprintf(out, "</spectrum>\n");
     }
+
+    fprintf(stderr, "\rWriting spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
 
     // ─── Step 4: Write footer ───────────────────────────────────────────
     fprintf(out, "</spectrumList>\n");
