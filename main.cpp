@@ -129,42 +129,42 @@ int main(int argc, char** argv) {
     // XML preamble
     fprintf(out, "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     fprintf(out, "<indexedmzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd\">\n");
-    fprintf(out, "  <mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"%s\" version=\"1.1.0\">\n", run_id.c_str());
-    fprintf(out, "    <cvList count=\"2\">\n");
-    fprintf(out, "      <cv id=\"MS\" fullName=\"Proteomics Standards Initiative Mass Spectrometry Ontology\" version=\"4.1.41\" URI=\"https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo\"/>\n");
-    fprintf(out, "      <cv id=\"UO\" fullName=\"Unit Ontology\" version=\"09:04:2014\" URI=\"https://raw.githubusercontent.com/bio-ontology-research-group/unit-ontology/master/unit.obo\"/>\n");
-    fprintf(out, "    </cvList>\n");
-    fprintf(out, "    <fileDescription>\n");
-    fprintf(out, "      <fileContent>\n");
-    fprintf(out, "        <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n");
-    fprintf(out, "        <cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n");
-    fprintf(out, "      </fileContent>\n");
-    fprintf(out, "      <sourceFileList count=\"1\">\n");
-    fprintf(out, "        <sourceFile id=\"%s.mgf\" name=\"%s.mgf\" location=\"file:///\">\n", run_id.c_str(), run_id.c_str());
-    fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000774\" name=\"multiple peak list nativeID format\" value=\"\"/>\n");
-    fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1001062\" name=\"Mascot MGF format\" value=\"\"/>\n");
-    fprintf(out, "        </sourceFile>\n");
-    fprintf(out, "      </sourceFileList>\n");
-    fprintf(out, "    </fileDescription>\n");
-    fprintf(out, "    <softwareList count=\"1\">\n");
-    fprintf(out, "      <software id=\"mgf_to_mzml_python\" version=\"1.0\">\n");
-    fprintf(out, "        <cvParam cvRef=\"MS\" accession=\"MS:1000615\" name=\"ProteoWizard software\" value=\"\"/>\n");
-    fprintf(out, "      </software>\n");
-    fprintf(out, "    </softwareList>\n");
-    fprintf(out, "    <instrumentConfigurationList count=\"1\">\n");
-    fprintf(out, "      <instrumentConfiguration id=\"IC\">\n");
-    fprintf(out, "        <cvParam cvRef=\"MS\" accession=\"MS:1000031\" name=\"instrument model\" value=\"\"/>\n");
-    fprintf(out, "      </instrumentConfiguration>\n");
-    fprintf(out, "    </instrumentConfigurationList>\n");
-    fprintf(out, "    <dataProcessingList count=\"1\">\n");
-    fprintf(out, "      <dataProcessing id=\"python_conversion\">\n");
-    fprintf(out, "        <processingMethod order=\"0\" softwareRef=\"mgf_to_mzml_python\">\n");
-    fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000544\" name=\"Conversion to mzML\" value=\"\"/>\n");
-    fprintf(out, "        </processingMethod>\n");
-    fprintf(out, "      </dataProcessing>\n");
-    fprintf(out, "    </dataProcessingList>\n");
-    fprintf(out, "    <run id=\"%s\" defaultInstrumentConfigurationRef=\"IC\">\n", run_id.c_str());
-    fprintf(out, "      <spectrumList count=\"%zu\" defaultDataProcessingRef=\"python_conversion\">\n", n_spectra);
+    fprintf(out, "<mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"%s\" version=\"1.1.0\">\n", run_id.c_str());
+    fprintf(out, "<cvList count=\"2\">\n");
+    fprintf(out, "<cv id=\"MS\" fullName=\"Proteomics Standards Initiative Mass Spectrometry Ontology\" version=\"4.1.41\" URI=\"https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo\"/>\n");
+    fprintf(out, "<cv id=\"UO\" fullName=\"Unit Ontology\" version=\"09:04:2014\" URI=\"https://raw.githubusercontent.com/bio-ontology-research-group/unit-ontology/master/unit.obo\"/>\n");
+    fprintf(out, "</cvList>\n");
+    fprintf(out, "<fileDescription>\n");
+    fprintf(out, "<fileContent>\n");
+    fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n");
+    fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n");
+    fprintf(out, "</fileContent>\n");
+    fprintf(out, "<sourceFileList count=\"1\">\n");
+    fprintf(out, "<sourceFile id=\"%s.mgf\" name=\"%s.mgf\" location=\"file:///\">\n", run_id.c_str(), run_id.c_str());
+    fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000774\" name=\"multiple peak list nativeID format\" value=\"\"/>\n");
+    fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1001062\" name=\"Mascot MGF format\" value=\"\"/>\n");
+    fprintf(out, "</sourceFile>\n");
+    fprintf(out, "</sourceFileList>\n");
+    fprintf(out, "</fileDescription>\n");
+    fprintf(out, "<softwareList count=\"1\">\n");
+    fprintf(out, "<software id=\"mgf_to_mzml_python\" version=\"1.0\">\n");
+    fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000615\" name=\"ProteoWizard software\" value=\"\"/>\n");
+    fprintf(out, "</software>\n");
+    fprintf(out, "</softwareList>\n");
+    fprintf(out, "<instrumentConfigurationList count=\"1\">\n");
+    fprintf(out, "<instrumentConfiguration id=\"IC\">\n");
+    fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000031\" name=\"instrument model\" value=\"\"/>\n");
+    fprintf(out, "</instrumentConfiguration>\n");
+    fprintf(out, "</instrumentConfigurationList>\n");
+    fprintf(out, "<dataProcessingList count=\"1\">\n");
+    fprintf(out, "<dataProcessing id=\"python_conversion\">\n");
+    fprintf(out, "<processingMethod order=\"0\" softwareRef=\"mgf_to_mzml_python\">\n");
+    fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000544\" name=\"Conversion to mzML\" value=\"\"/>\n");
+    fprintf(out, "</processingMethod>\n");
+    fprintf(out, "</dataProcessing>\n");
+    fprintf(out, "</dataProcessingList>\n");
+    fprintf(out, "<run id=\"%s\" defaultInstrumentConfigurationRef=\"IC\">\n", run_id.c_str());
+    fprintf(out, "<spectrumList count=\"%zu\" defaultDataProcessingRef=\"python_conversion\">\n", n_spectra);
 
     // ─── Step 3: Write spectra ──────────────────────────────────────────
     fprintf(stderr, "Writing %zu spectra...\n", n_spectra);
@@ -221,84 +221,84 @@ int main(int argc, char** argv) {
         auto int_b64 = base64_encode(int_compressed.data(), int_compressed.size());
 
         // Write spectrum XML
-        fprintf(out, "        <spectrum index=\"%zu\" id=\"index=%zu\" defaultArrayLength=\"%zu\">\n",
+        fprintf(out, "<spectrum index=\"%zu\" id=\"index=%zu\" defaultArrayLength=\"%zu\">\n",
                 i, i, (size_t)frag_count);
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n");
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000511\" name=\"ms level\" value=\"2\"/>\n");
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000511\" name=\"ms level\" value=\"2\"/>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n");
 
         // Spectrum title: run_id.idx.idx.2 File:"", NativeID:"index=idx"
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000796\" name=\"spectrum title\" value=\"%s.%zu.%zu.2 File:&quot;&quot;, NativeID:&quot;index=%zu&quot;\"/>\n",
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000796\" name=\"spectrum title\" value=\"%s.%zu.%zu.2 File:&quot;&quot;, NativeID:&quot;index=%zu&quot;\"/>\n",
                 run_id.c_str(), i, i, i);
 
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000130\" name=\"positive scan\" value=\"\"/>\n");
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000528\" name=\"lowest observed m/z\" value=\"%s\"/>\n", fmt_float(lowest_mz, 3).c_str());
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000527\" name=\"highest observed m/z\" value=\"%s\"/>\n", fmt_float(highest_mz, 3).c_str());
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000285\" name=\"total ion current\" value=\"%s\"/>\n", fmt_float(tic, 1).c_str());
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000504\" name=\"base peak m/z\" value=\"%s\"/>\n", fmt_float(base_peak_mz, 3).c_str());
-        fprintf(out, "          <cvParam cvRef=\"MS\" accession=\"MS:1000505\" name=\"base peak intensity\" value=\"%s\"/>\n", fmt_float(base_peak_int, 1).c_str());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000130\" name=\"positive scan\" value=\"\"/>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000528\" name=\"lowest observed m/z\" value=\"%s\"/>\n", fmt_float(lowest_mz, 3).c_str());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000527\" name=\"highest observed m/z\" value=\"%s\"/>\n", fmt_float(highest_mz, 3).c_str());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000285\" name=\"total ion current\" value=\"%s\"/>\n", fmt_float(tic, 1).c_str());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000504\" name=\"base peak m/z\" value=\"%s\"/>\n", fmt_float(base_peak_mz, 3).c_str());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000505\" name=\"base peak intensity\" value=\"%s\"/>\n", fmt_float(base_peak_int, 1).c_str());
 
-        fprintf(out, "          <scanList count=\"1\">\n");
-        fprintf(out, "            <cvParam cvRef=\"MS\" accession=\"MS:1000795\" name=\"no combination\" value=\"\"/>\n");
-        fprintf(out, "            <scan>\n");
-        fprintf(out, "              <cvParam cvRef=\"MS\" accession=\"MS:1000016\" name=\"scan start time\" value=\"%s\" unitCvRef=\"UO\" unitAccession=\"UO:0000010\" unitName=\"second\"/>\n", fmt_float(rt).c_str());
-        fprintf(out, "              <cvParam cvRef=\"MS\" accession=\"MS:1002815\" name=\"inverse reduced ion mobility\" value=\"%s\" unitCvRef=\"MS\" unitAccession=\"MS:1002814\" unitName=\"volt-second per square centimeter\"/>\n", fmt_float(iim, 4).c_str());
-        fprintf(out, "            </scan>\n");
-        fprintf(out, "          </scanList>\n");
+        fprintf(out, "<scanList count=\"1\">\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000795\" name=\"no combination\" value=\"\"/>\n");
+        fprintf(out, "<scan>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000016\" name=\"scan start time\" value=\"%s\" unitCvRef=\"UO\" unitAccession=\"UO:0000010\" unitName=\"second\"/>\n", fmt_float(rt).c_str());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1002815\" name=\"inverse reduced ion mobility\" value=\"%s\" unitCvRef=\"MS\" unitAccession=\"MS:1002814\" unitName=\"volt-second per square centimeter\"/>\n", fmt_float(iim, 4).c_str());
+        fprintf(out, "</scan>\n");
+        fprintf(out, "</scanList>\n");
 
-        fprintf(out, "          <precursorList count=\"1\">\n");
-        fprintf(out, "            <precursor>\n");
-        fprintf(out, "              <selectedIonList count=\"1\">\n");
-        fprintf(out, "                <selectedIon>\n");
-        fprintf(out, "                  <cvParam cvRef=\"MS\" accession=\"MS:1000744\" name=\"selected ion m/z\" value=\"%s\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n", fmt_float(prec_mz).c_str());
-        fprintf(out, "                  <cvParam cvRef=\"MS\" accession=\"MS:1000041\" name=\"charge state\" value=\"%u\"/>\n", (unsigned)charge);
-        fprintf(out, "                </selectedIon>\n");
-        fprintf(out, "              </selectedIonList>\n");
-        fprintf(out, "              <activation>\n");
-        fprintf(out, "              </activation>\n");
-        fprintf(out, "            </precursor>\n");
-        fprintf(out, "          </precursorList>\n");
+        fprintf(out, "<precursorList count=\"1\">\n");
+        fprintf(out, "<precursor>\n");
+        fprintf(out, "<selectedIonList count=\"1\">\n");
+        fprintf(out, "<selectedIon>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000744\" name=\"selected ion m/z\" value=\"%s\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n", fmt_float(prec_mz).c_str());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000041\" name=\"charge state\" value=\"%u\"/>\n", (unsigned)charge);
+        fprintf(out, "</selectedIon>\n");
+        fprintf(out, "</selectedIonList>\n");
+        fprintf(out, "<activation>\n");
+        fprintf(out, "</activation>\n");
+        fprintf(out, "</precursor>\n");
+        fprintf(out, "</precursorList>\n");
 
-        fprintf(out, "          <binaryDataArrayList count=\"2\">\n");
+        fprintf(out, "<binaryDataArrayList count=\"2\">\n");
 
         // m/z array
-        fprintf(out, "            <binaryDataArray encodedLength=\"%zu\">\n", mz_b64.size());
-        fprintf(out, "              <cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n");
-        fprintf(out, "              <cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n");
-        fprintf(out, "              <cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n");
-        fprintf(out, "              <binary>%s</binary>\n", mz_b64.c_str());
-        fprintf(out, "            </binaryDataArray>\n");
+        fprintf(out, "<binaryDataArray encodedLength=\"%zu\">\n", mz_b64.size());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n");
+        fprintf(out, "<binary>%s</binary>\n", mz_b64.c_str());
+        fprintf(out, "</binaryDataArray>\n");
 
         // intensity array
-        fprintf(out, "            <binaryDataArray encodedLength=\"%zu\">\n", int_b64.size());
-        fprintf(out, "              <cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n");
-        fprintf(out, "              <cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n");
-        fprintf(out, "              <cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>\n");
-        fprintf(out, "              <binary>%s</binary>\n", int_b64.c_str());
-        fprintf(out, "            </binaryDataArray>\n");
+        fprintf(out, "<binaryDataArray encodedLength=\"%zu\">\n", int_b64.size());
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n");
+        fprintf(out, "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>\n");
+        fprintf(out, "<binary>%s</binary>\n", int_b64.c_str());
+        fprintf(out, "</binaryDataArray>\n");
 
-        fprintf(out, "          </binaryDataArrayList>\n");
-        fprintf(out, "        </spectrum>\n");
+        fprintf(out, "</binaryDataArrayList>\n");
+        fprintf(out, "</spectrum>\n");
     }
 
     // ─── Step 4: Write footer ───────────────────────────────────────────
-    fprintf(out, "      </spectrumList>\n");
-    fprintf(out, "    </run>\n");
-    fprintf(out, "  </mzML>\n");
+    fprintf(out, "</spectrumList>\n");
+    fprintf(out, "</run>\n");
+    fprintf(out, "</mzML>\n");
 
     long index_list_offset = ftell(out);
 
-    fprintf(out, "  <indexList count=\"2\">\n");
-    fprintf(out, "    <index name=\"spectrum\">\n");
+    fprintf(out, "<indexList count=\"2\">\n");
+    fprintf(out, "<index name=\"spectrum\">\n");
     for (size_t i = 0; i < n_spectra; i++) {
-        fprintf(out, "      <offset idRef=\"index=%zu\">%ld</offset>\n", i, spectrum_offsets[i]);
+        fprintf(out, "<offset idRef=\"index=%zu\">%ld</offset>\n", i, spectrum_offsets[i]);
     }
-    fprintf(out, "    </index>\n");
-    fprintf(out, "    <index name=\"chromatogram\">\n");
-    fprintf(out, "    </index>\n");
-    fprintf(out, "  </indexList>\n");
-    fprintf(out, "  <indexListOffset>%ld</indexListOffset>\n", index_list_offset);
-    fprintf(out, "  <fileChecksum>0000000000000000000000000000000000000000</fileChecksum>\n");
+    fprintf(out, "</index>\n");
+    fprintf(out, "<index name=\"chromatogram\">\n");
+    fprintf(out, "</index>\n");
+    fprintf(out, "</indexList>\n");
+    fprintf(out, "<indexListOffset>%ld</indexListOffset>\n", index_list_offset);
+    fprintf(out, "<fileChecksum>0000000000000000000000000000000000000000</fileChecksum>\n");
     fprintf(out, "</indexedmzML>\n");
 
     fclose(out);
