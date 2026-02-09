@@ -143,6 +143,11 @@ struct SpectrumTemplate {
 };
 static SpectrumTemplate spectrum_tmpl;
 
+// ─── mmap size estimation ───────────────────────────────────────────────────
+static size_t estimate_spectrum_size(uint64_t frag_count) {
+    return 3500 + frag_count * 12;
+}
+
 // ─── reusable per-thread buffers ────────────────────────────────────────────
 struct RenderBufs {
     std::vector<float>   int_f32;      // intensity float32 conversion
@@ -637,28 +642,41 @@ int main(int argc, char** argv) {
         fclose(out);
 
     } else {
-        // ─── Multi-threaded path (two-phase: parallel render, ordered write) ─
+        // ─── Multi-threaded path (mmap: overallocate, render in-place, compact) ─
         int fd = ::open(output_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
 
-        // Write header
-        ::pwrite(fd, header.data(), header.size(), 0);
+        // Step 1: Compute per-spectrum reserved offsets via prefix sum
+        std::vector<size_t> reserved_off(n_spectra + 1);
+        reserved_off[0] = header_size;
+        for (size_t i = 0; i < n_spectra; i++) {
+            size_t pi = valid_idx[i];
+            reserved_off[i + 1] = reserved_off[i] + estimate_spectrum_size(didx_size_col[pi]);
+        }
+        size_t footer_estimate = n_spectra * 60 + 500;
+        size_t total_estimate = reserved_off[n_spectra] + footer_estimate;
 
-        std::vector<long> spectrum_offsets(n_spectra);
+        fprintf(stderr, "Estimated file size: %.2f GiB\n", total_estimate / (1024.0 * 1024.0 * 1024.0));
 
-        // Per-thread result: rendered output + local spectrum offsets
-        struct ThreadResult {
-            std::string wbuf;
-            std::vector<std::pair<size_t, size_t>> offsets; // (spectrum_idx, local_offset)
-        };
-        std::vector<ThreadResult> results(thread_cnt);
+        // Step 2: ftruncate + mmap
+        if (ftruncate(fd, total_estimate) < 0) {
+            fprintf(stderr, "ftruncate failed: %s\n", strerror(errno));
+            ::close(fd); return 1;
+        }
+        char* map = (char*)mmap(NULL, total_estimate, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) {
+            fprintf(stderr, "mmap failed: %s\n", strerror(errno));
+            ::close(fd); return 1;
+        }
 
-        // Phase 1: parallel render
-        auto worker = [&](int tid, size_t begin, size_t end) {
+        // Step 3: Write header into mmap
+        memcpy(map, header.data(), header_size);
+
+        // Step 4: Parallel render into reserved mmap regions
+        std::vector<size_t> actual_size(n_spectra);
+
+        auto worker = [&](size_t begin, size_t end) {
             RenderBufs bufs;
-            ThreadResult& res = results[tid];
-            res.offsets.reserve(end - begin);
-
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
@@ -667,8 +685,8 @@ int main(int argc, char** argv) {
                     didx_idx_col[pi], didx_size_col[pi],
                     prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
 
-                res.offsets.push_back({i, res.wbuf.size()});
-                res.wbuf.append(bufs.output);
+                memcpy(map + reserved_off[i], bufs.output.data(), bufs.output.size());
+                actual_size[i] = bufs.output.size();
 
                 size_t p = progress.fetch_add(1) + 1;
                 if (p % progress_step == 0)
@@ -682,61 +700,50 @@ int main(int argc, char** argv) {
         size_t start = 0;
         for (int t = 0; t < thread_cnt; t++) {
             size_t end = start + chunk + (t < (int)remainder ? 1 : 0);
-            threads.emplace_back(worker, t, start, end);
+            threads.emplace_back(worker, start, end);
             start = end;
         }
         for (auto& th : threads) th.join();
 
         fprintf(stderr, "\rRendering spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
 
-        // Phase 2: ordered write (thread 0 first, then thread 1, ...)
-        size_t body_pos = 0;
-        for (int t = 0; t < thread_cnt; t++) {
-            ThreadResult& res = results[t];
-            size_t thread_start = header_size + body_pos;
-
-            // Resolve spectrum offsets
-            for (auto& [idx, local_off] : res.offsets)
-                spectrum_offsets[idx] = (long)(thread_start + local_off);
-
-            // Write this thread's buffer
-            size_t written = 0;
-            while (written < res.wbuf.size()) {
-                ssize_t ret = ::pwrite(fd, res.wbuf.data() + written,
-                                       res.wbuf.size() - written,
-                                       thread_start + written);
-                if (ret < 0) {
-                    fprintf(stderr, "pwrite failed: %s\n", strerror(errno));
-                    exit(1);
-                }
-                written += ret;
-            }
-            body_pos += res.wbuf.size();
-
-            // Free memory as we go
-            res.wbuf.clear();
-            res.wbuf.shrink_to_fit();
+        // Step 5: Sequential compaction
+        fprintf(stderr, "Compacting...\n");
+        std::vector<long> spectrum_offsets(n_spectra);
+        size_t write_pos = header_size;
+        for (size_t i = 0; i < n_spectra; i++) {
+            spectrum_offsets[i] = (long)write_pos;
+            if (write_pos != reserved_off[i])
+                memmove(map + write_pos, map + reserved_off[i], actual_size[i]);
+            write_pos += actual_size[i];
         }
 
-        // Write footer
-        off_t footer_off = header_size + body_pos;
+        // Step 6: Build and write footer
+        off_t footer_off = (off_t)write_pos;
         std::string footer = build_footer(spectrum_offsets, (long)footer_off);
+        size_t final_size = write_pos + footer.size();
 
-        size_t written = 0;
-        while (written < footer.size()) {
-            ssize_t ret = ::pwrite(fd, footer.data() + written, footer.size() - written,
-                                   footer_off + written);
-            if (ret < 0) {
-                fprintf(stderr, "pwrite failed: %s\n", strerror(errno));
-                exit(1);
+        // Footer might exceed our estimate — remap if needed
+        if (final_size > total_estimate) {
+            munmap(map, total_estimate);
+            if (ftruncate(fd, final_size) < 0) {
+                fprintf(stderr, "ftruncate (grow) failed: %s\n", strerror(errno));
+                ::close(fd); return 1;
             }
-            written += ret;
+            map = (char*)mmap(NULL, final_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (map == MAP_FAILED) {
+                fprintf(stderr, "mmap (remap) failed: %s\n", strerror(errno));
+                ::close(fd); return 1;
+            }
+            total_estimate = final_size;
         }
+        memcpy(map + write_pos, footer.data(), footer.size());
 
-        ftruncate(fd, footer_off + footer.size());
+        // Step 7: Truncate to actual size, munmap
+        munmap(map, total_estimate);
+        ftruncate(fd, final_size);
 
         if (compute_sha1) {
-            // Patch SHA1 checksum: hash everything before the <fileChecksum> line
             size_t checksum_tag_off = footer.find("  <fileChecksum>");
             size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
             off_t hash_end_pos = footer_off + (off_t)checksum_tag_off;
