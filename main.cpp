@@ -1,4 +1,5 @@
 #include "mmappet.hpp"
+#include "MSNumpress.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -45,7 +46,7 @@ static int fmt_float_buf(char* buf, double val, int max_decimals = 6) {
 }
 
 // ─── spectrum XML template ─────────────────────────────────────────────────
-// {} placeholders (20 total, in order):
+// {} placeholders (22 total, in order):
 //  0-1: index, index
 //  2:   frag_count
 //  3-6: run_id, index, index, index
@@ -54,9 +55,13 @@ static int fmt_float_buf(char* buf, double val, int max_decimals = 6) {
 // 10-11: base_peak_mz (3 dec), base_peak_int (1 dec)
 // 12-13: rt (6 dec), iim (4 dec)
 // 14-15: prec_mz (6 dec), charge
-// 16-17: mz_b64_len, mz_b64_data
-// 18-19: int_b64_len, int_b64_data
-static constexpr int SPECTRUM_N_SLOTS = 20;
+// 16: mz_b64_len
+// 17: mz encoding cvParam line (varies: 32-bit float or numpress linear)
+// 18: mz_b64_data
+// 19: int_b64_len
+// 20: int encoding cvParam line (varies: 32-bit float or numpress pic)
+// 21: int_b64_data
+static constexpr int SPECTRUM_N_SLOTS = 22;
 static const char SPECTRUM_TPL[] =
 "<spectrum index=\"{}\" id=\"index={}\" defaultArrayLength=\"{}\">\n"
 "<cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n"
@@ -90,19 +95,27 @@ static const char SPECTRUM_TPL[] =
 "</precursorList>\n"
 "<binaryDataArrayList count=\"2\">\n"
 "<binaryDataArray encodedLength=\"{}\">\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n"
+"{}"
 "<cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n"
 "<cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n"
 "<binary>{}</binary>\n"
 "</binaryDataArray>\n"
 "<binaryDataArray encodedLength=\"{}\">\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n"
+"{}"
 "<cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n"
 "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>\n"
 "<binary>{}</binary>\n"
 "</binaryDataArray>\n"
 "</binaryDataArrayList>\n"
 "</spectrum>\n";
+
+// Encoding cvParam lines (constant per run, selected by --numpress flag)
+static const char CV_32BIT_FLOAT[] =
+    "<cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n";
+static const char CV_NUMPRESS_LINEAR[] =
+    "<cvParam cvRef=\"MS\" accession=\"MS:1002746\" name=\"MS-Numpress linear prediction compression\" value=\"\"/>\n";
+static const char CV_NUMPRESS_PIC[] =
+    "<cvParam cvRef=\"MS\" accession=\"MS:1002747\" name=\"MS-Numpress positive integer compression\" value=\"\"/>\n";
 
 // Parsed template: fixed text segments between {} placeholders
 struct SpectrumTemplate {
@@ -136,6 +149,10 @@ struct RenderBufs {
     std::string          output;       // final XML string
     z_stream             zstrm;        // reusable zlib stream (avoids malloc/free per call)
     bool                 zstrm_init = false;
+    // Numpress buffers
+    std::vector<double>        mz_f64;    // float32 → double for numpress
+    std::vector<double>        int_f64;   // uint32 → double for numpress
+    std::vector<unsigned char> np_buf;    // numpress output (max: 8 + N*5)
 
     void init_zlib(int level) {
         memset(&zstrm, 0, sizeof(zstrm));
@@ -170,6 +187,10 @@ static void render_spectrum(
     const char* run_id,
     size_t run_id_len,
     int zlib_level,
+    bool mz_sorted,
+    bool use_numpress,
+    const char* mz_enc_cv, size_t mz_enc_cv_len,
+    const char* int_enc_cv, size_t int_enc_cv_len,
     const float* frag_mz_data,
     const uint32_t* frag_int_data,
     uint64_t frag_offset,
@@ -185,29 +206,65 @@ static void render_spectrum(
     float base_peak_mz = 0;
     float base_peak_int = 0;
 
-    for (uint64_t j = 0; j < frag_count; j++) {
-        float mz = frag_mz_data[frag_offset + j];
-        float fi = (float)frag_int_data[frag_offset + j];
-        if (j == 0 || mz < lowest_mz) lowest_mz = mz;
-        if (j == 0 || mz > highest_mz) highest_mz = mz;
-        tic += fi;
-        if (j == 0 || fi > base_peak_int) {
-            base_peak_int = fi;
-            base_peak_mz = mz;
+    if (mz_sorted && frag_count > 0) {
+        // Sorted: lowest/highest from endpoints, only scan intensity
+        lowest_mz  = frag_mz_data[frag_offset];
+        highest_mz = frag_mz_data[frag_offset + frag_count - 1];
+        uint64_t best_j = 0;
+        for (uint64_t j = 0; j < frag_count; j++) {
+            float fi = (float)frag_int_data[frag_offset + j];
+            tic += fi;
+            if (fi > base_peak_int) { base_peak_int = fi; best_j = j; }
+        }
+        base_peak_mz = frag_mz_data[frag_offset + best_j];
+    } else {
+        for (uint64_t j = 0; j < frag_count; j++) {
+            float mz = frag_mz_data[frag_offset + j];
+            float fi = (float)frag_int_data[frag_offset + j];
+            if (j == 0 || mz < lowest_mz) lowest_mz = mz;
+            if (j == 0 || mz > highest_mz) highest_mz = mz;
+            tic += fi;
+            if (j == 0 || fi > base_peak_int) {
+                base_peak_int = fi;
+                base_peak_mz = mz;
+            }
         }
     }
 
-    // Encode mz array: float32 → zlib → base64
     if (!bufs.zstrm_init) bufs.init_zlib(zlib_level);
-    zlib_compress_into(bufs, &frag_mz_data[frag_offset], frag_count * sizeof(float));
-    base64_encode_into(bufs.mz_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
 
-    // Encode intensity array: u32 → f32 → zlib → base64
-    bufs.int_f32.resize(frag_count);
-    for (uint64_t j = 0; j < frag_count; j++)
-        bufs.int_f32[j] = (float)frag_int_data[frag_offset + j];
-    zlib_compress_into(bufs, bufs.int_f32.data(), frag_count * sizeof(float));
-    base64_encode_into(bufs.int_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+    if (use_numpress) {
+        using namespace ms::numpress::MSNumpress;
+        // mz: float32 → double → numpress linear → zlib → base64
+        bufs.mz_f64.resize(frag_count);
+        for (uint64_t j = 0; j < frag_count; j++)
+            bufs.mz_f64[j] = (double)frag_mz_data[frag_offset + j];
+        bufs.np_buf.resize(8 + frag_count * 5);
+        double fp = optimalLinearFixedPoint(bufs.mz_f64.data(), frag_count);
+        size_t np_len = encodeLinear(bufs.mz_f64.data(), frag_count, bufs.np_buf.data(), fp);
+        zlib_compress_into(bufs, bufs.np_buf.data(), np_len);
+        base64_encode_into(bufs.mz_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+
+        // intensity: u32 → double → numpress pic → zlib → base64
+        bufs.int_f64.resize(frag_count);
+        for (uint64_t j = 0; j < frag_count; j++)
+            bufs.int_f64[j] = (double)frag_int_data[frag_offset + j];
+        bufs.np_buf.resize(frag_count * 5);
+        np_len = encodePic(bufs.int_f64.data(), frag_count, bufs.np_buf.data());
+        zlib_compress_into(bufs, bufs.np_buf.data(), np_len);
+        base64_encode_into(bufs.int_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+    } else {
+        // mz: raw float32 → zlib → base64
+        zlib_compress_into(bufs, &frag_mz_data[frag_offset], frag_count * sizeof(float));
+        base64_encode_into(bufs.mz_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+
+        // intensity: u32 → f32 → zlib → base64
+        bufs.int_f32.resize(frag_count);
+        for (uint64_t j = 0; j < frag_count; j++)
+            bufs.int_f32[j] = (float)frag_int_data[frag_offset + j];
+        zlib_compress_into(bufs, bufs.int_f32.data(), frag_count * sizeof(float));
+        base64_encode_into(bufs.int_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+    }
 
     // Format all scalar values
     char idx_s[32], frag_s[32], charge_s[32], mz_b64l_s[32], int_b64l_s[32];
@@ -248,9 +305,11 @@ static void render_spectrum(
         {prec_mz_s, (size_t)prec_mz_n},         // 14: prec_mz
         {charge_s,  (size_t)charge_n},           // 15: charge
         {mz_b64l_s, (size_t)mz_b64l_n},         // 16: mz_b64_len
-        {bufs.mz_b64.data(),  bufs.mz_b64.size()},  // 17: mz_b64_data
-        {int_b64l_s,(size_t)int_b64l_n},         // 18: int_b64_len
-        {bufs.int_b64.data(), bufs.int_b64.size()},  // 19: int_b64_data
+        {mz_enc_cv, mz_enc_cv_len},             // 17: mz encoding cvParam
+        {bufs.mz_b64.data(),  bufs.mz_b64.size()},  // 18: mz_b64_data
+        {int_b64l_s,(size_t)int_b64l_n},         // 19: int_b64_len
+        {int_enc_cv, int_enc_cv_len},            // 20: int encoding cvParam
+        {bufs.int_b64.data(), bufs.int_b64.size()},  // 21: int_b64_data
     };
 
     // Render: interleave template segments with values
@@ -346,7 +405,7 @@ static std::string build_footer(const std::vector<long>& offsets, long footer_st
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run] [--spectra-not-sorted] [--numpress] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
@@ -356,6 +415,9 @@ int main(int argc, char** argv) {
     int zlib_level = 1;
     int thread_cnt = 1;
     bool dry_run = false;
+    bool mz_sorted = true;
+    bool use_numpress = false;
+    size_t used_spectra_cnt = 0;  // 0 = use all
 
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--precursors-dir") == 0 && i + 1 < argc) {
@@ -369,6 +431,12 @@ int main(int argc, char** argv) {
             if (thread_cnt < 1) thread_cnt = 1;
         } else if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = true;
+        } else if (strcmp(argv[i], "--spectra-not-sorted") == 0) {
+            mz_sorted = false;
+        } else if (strcmp(argv[i], "--numpress") == 0) {
+            use_numpress = true;
+        } else if (strcmp(argv[i], "--used-spectra-cnt") == 0 && i + 1 < argc) {
+            used_spectra_cnt = (size_t)atol(argv[++i]);
         }
     }
 
@@ -392,6 +460,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error: precursor count (%zu) > dataindex count (%zu)\n", n_spectra, n_dataindex);
         return 1;
     }
+    if (used_spectra_cnt > 0 && used_spectra_cnt < n_spectra)
+        n_spectra = used_spectra_cnt;
 
     auto& frag_mz_col    = frag_ds.get_column<3>();
     auto& frag_int_col    = frag_ds.get_column<1>();
@@ -425,6 +495,12 @@ int main(int argc, char** argv) {
     const char* run_id_cstr = run_id.c_str();
     size_t run_id_len = run_id.size();
 
+    // Select encoding cvParam strings based on --numpress
+    const char* mz_enc_cv  = use_numpress ? CV_NUMPRESS_LINEAR : CV_32BIT_FLOAT;
+    size_t mz_enc_cv_len   = use_numpress ? sizeof(CV_NUMPRESS_LINEAR) - 1 : sizeof(CV_32BIT_FLOAT) - 1;
+    const char* int_enc_cv = use_numpress ? CV_NUMPRESS_PIC : CV_32BIT_FLOAT;
+    size_t int_enc_cv_len  = use_numpress ? sizeof(CV_NUMPRESS_PIC) - 1 : sizeof(CV_32BIT_FLOAT) - 1;
+
     if (dry_run) {
         // ─── Dry-run: compute total size, no file I/O ──────────────────
         std::atomic<size_t> total_bytes{header_size};
@@ -432,7 +508,8 @@ int main(int argc, char** argv) {
         auto worker = [&](size_t begin, size_t end) {
             RenderBufs bufs;
             for (size_t i = begin; i < end; i++) {
-                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level,
+                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                    use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     didx_idx_col[i], didx_size_col[i],
                     prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
@@ -477,7 +554,8 @@ int main(int argc, char** argv) {
 
             spectrum_offsets[i] = ftell(out);
 
-            render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level,
+            render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                 frag_mz_data, frag_int_data,
                 didx_idx_col[i], didx_size_col[i],
                 prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
@@ -534,7 +612,8 @@ int main(int argc, char** argv) {
             };
 
             for (size_t i = begin; i < end; i++) {
-                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level,
+                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                    use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     didx_idx_col[i], didx_size_col[i],
                     prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);

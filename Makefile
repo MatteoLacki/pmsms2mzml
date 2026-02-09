@@ -2,10 +2,13 @@ CXX      := clang++
 CXXFLAGS := -std=c++20 -O3 -Wall -Isrc -Izlib
 LDFLAGS  := -Lzlib -lz -lpthread
 
-myprog: main.o
+myprog: main.o MSNumpress.o
 	$(CXX) $^ -o $@ $(LDFLAGS)
 
 main.o: main.cpp
+	$(CXX) $(CXXFLAGS) -c $<
+
+MSNumpress.o: src/MSNumpress.cpp
 	$(CXX) $(CXXFLAGS) -c $<
 
 THREADS ?= 1
