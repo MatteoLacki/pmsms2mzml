@@ -128,12 +128,12 @@ Schema (9 columns):
 
 Single-file C++ converter. Usage:
 ```
-./myprog <pmsms_dir> <precursors_dir> <output.mzml> [--run-id NAME] [--zlib-level N]
+./myprog <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run]
 ```
 
 Example:
 ```
-./myprog input/testcutF9477.mmappet input/filtered_precursors_with_nontrivial_ms2_44.mmappet output/tiny_test.mzml --run-id tiny
+./myprog input/testcutF9477.mmappet output/tiny_test.mzml --precursors-dir input/filtered_precursors_with_nontrivial_ms2_44.mmappet --run-id tiny --threads 4
 ```
 
 Features implemented:
@@ -142,7 +142,26 @@ Features implemented:
 - 32-bit float + zlib compression + base64 encoding for binary arrays
 - Per-spectrum stats: lowest/highest mz, TIC, base peak mz/intensity
 - Spectrum title format: `{run_id}.{idx}.{idx}.2 File:"", NativeID:"index={idx}"`
-- CLI args: --run-id, --zlib-level
+- CLI args: --precursors-dir (default: `<pmsms_dir>/filtered_precursors_with_nontrivial_ms2.mmappet/`), --run-id, --zlib-level, --threads, --dry-run
+- Multi-threaded: pwrite + atomic position counter, spectra order not guaranteed
+- `--dry-run`: computes total output size without file I/O (for benchmarking CPU vs I/O)
+
+### Architecture: spectrum XML template
+The repeated per-spectrum XML is defined as a single string (`SPECTRUM_TPL`) with 20 `{}` placeholders, parsed once at startup into fixed segments. `render_spectrum()` formats all values, then interleaves segments and values in a tight loop with one pre-computed `reserve()`.
+
+### Performance optimizations
+- Persistent zlib stream (`deflateInit2` once + `deflateReset` per spectrum) — avoids 50KB malloc/free per call
+- Batched pwrite: 4MB write buffer per thread (~1000 spectra per write), reduces syscalls from ~1M to ~900
+- `madvise(MADV_SEQUENTIAL)` on input mmap regions for kernel readahead
+- `setvbuf(..., 4MB)` on single-threaded output
+
+### Benchmarks (F9477: 1,021,494 spectra, 3.49 GiB output, 4 threads)
+| mode | wall | user | sys |
+|------|------|------|-----|
+| dry-run | 13.6s | 47.0s | 0.15s |
+| real write | 18.9s | 47.8s | 5.6s |
+
+I/O overhead: ~5.3s (660 MB/s effective write throughput).
 
 Verified: output matches reference (example_output/tiny.mzml) structurally — 44 spectra, 2074 lines, identical binary data. Minor value differences in metadata are expected (binary f32 precision vs MGF text rounding).
 

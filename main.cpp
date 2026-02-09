@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <atomic>
 #include <thread>
+#include <sys/mman.h>
 #include <zlib.h>
 
 // ─── base64 encode ──────────────────────────────────────────────────────────
@@ -345,7 +346,7 @@ static std::string build_footer(const std::vector<long>& offsets, long footer_st
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
@@ -354,6 +355,7 @@ int main(int argc, char** argv) {
     std::string run_id = output_path.stem().string();
     int zlib_level = 1;
     int thread_cnt = 1;
+    bool dry_run = false;
 
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--precursors-dir") == 0 && i + 1 < argc) {
@@ -365,6 +367,8 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             thread_cnt = atoi(argv[++i]);
             if (thread_cnt < 1) thread_cnt = 1;
+        } else if (strcmp(argv[i], "--dry-run") == 0) {
+            dry_run = true;
         }
     }
 
@@ -404,6 +408,12 @@ int main(int argc, char** argv) {
     const float*    frag_mz_data  = frag_mz_col.data();
     const uint32_t* frag_int_data = frag_int_col.data();
 
+    // Hint sequential access on large input arrays (reduces page fault stalls)
+    madvise((void*)frag_mz_data,  frag_mz_col.size()  * sizeof(float),    MADV_SEQUENTIAL);
+    madvise((void*)frag_int_data, frag_int_col.size()  * sizeof(uint32_t), MADV_SEQUENTIAL);
+    madvise((void*)didx_idx_col.data(),  didx_idx_col.size()  * sizeof(uint64_t), MADV_SEQUENTIAL);
+    madvise((void*)didx_size_col.data(), didx_size_col.size() * sizeof(uint64_t), MADV_SEQUENTIAL);
+
     // ─── Build header ───────────────────────────────────────────────────
     std::string header = build_header(run_id, n_spectra);
     size_t header_size = header.size();
@@ -415,10 +425,46 @@ int main(int argc, char** argv) {
     const char* run_id_cstr = run_id.c_str();
     size_t run_id_len = run_id.size();
 
-    if (thread_cnt == 1) {
+    if (dry_run) {
+        // ─── Dry-run: compute total size, no file I/O ──────────────────
+        std::atomic<size_t> total_bytes{header_size};
+
+        auto worker = [&](size_t begin, size_t end) {
+            RenderBufs bufs;
+            for (size_t i = begin; i < end; i++) {
+                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level,
+                    frag_mz_data, frag_int_data,
+                    didx_idx_col[i], didx_size_col[i],
+                    prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
+                total_bytes.fetch_add(bufs.output.size(), std::memory_order_relaxed);
+
+                size_t p = progress.fetch_add(1) + 1;
+                if (p % progress_step == 0)
+                    fprintf(stderr, "\rRendering spectra: %zu / %zu (%zu%%)", p, n_spectra, p * 100 / n_spectra);
+            }
+        };
+
+        std::vector<std::thread> threads;
+        size_t chunk = n_spectra / thread_cnt;
+        size_t remainder = n_spectra % thread_cnt;
+        size_t start = 0;
+        for (int t = 0; t < thread_cnt; t++) {
+            size_t end = start + chunk + (t < (int)remainder ? 1 : 0);
+            threads.emplace_back(worker, start, end);
+            start = end;
+        }
+        for (auto& th : threads) th.join();
+
+        fprintf(stderr, "\rRendering spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
+        fprintf(stderr, "Dry run: %zu bytes (%.2f GiB) for %zu spectra\n",
+            total_bytes.load(), total_bytes.load() / (1024.0 * 1024.0 * 1024.0), n_spectra);
+        return 0;
+
+    } else if (thread_cnt == 1) {
         // ─── Single-threaded path ───────────────────────────────────────
         FILE* out = fopen(output_path.c_str(), "wb");
         if (!out) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
+        setvbuf(out, NULL, _IOFBF, 4 * 1024 * 1024);  // 4MB write buffer
 
         fwrite(header.data(), 1, header.size(), out);
 
@@ -446,7 +492,7 @@ int main(int argc, char** argv) {
         fclose(out);
 
     } else {
-        // ─── Multi-threaded path (pwrite) ───────────────────────────────
+        // ─── Multi-threaded path (batched pwrite) ───────────────────────
         int fd = ::open(output_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
 
@@ -455,23 +501,28 @@ int main(int argc, char** argv) {
 
         std::atomic<size_t> write_pos{0};
         std::vector<long> spectrum_offsets(n_spectra);
+        constexpr size_t WRITE_BUF_SIZE = 4 * 1024 * 1024;  // 4MB batches
 
         auto worker = [&](size_t begin, size_t end) {
             RenderBufs bufs;
-            for (size_t i = begin; i < end; i++) {
-                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level,
-                    frag_mz_data, frag_int_data,
-                    didx_idx_col[i], didx_size_col[i],
-                    prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
+            std::string wbuf;
+            wbuf.reserve(WRITE_BUF_SIZE + 64 * 1024);
 
-                const std::string& xml = bufs.output;
-                size_t pos = write_pos.fetch_add(xml.size());
-                spectrum_offsets[i] = (long)(header_size + pos);
+            // Pending offsets: spectrum index + position within wbuf
+            struct Pending { size_t idx; size_t off; };
+            std::vector<Pending> pending;
 
-                // pwrite may need multiple calls for large buffers
+            auto flush = [&]() {
+                if (wbuf.empty()) return;
+                size_t pos = write_pos.fetch_add(wbuf.size());
+                for (auto& p : pending)
+                    spectrum_offsets[p.idx] = (long)(header_size + pos + p.off);
+                pending.clear();
+
                 size_t written = 0;
-                while (written < xml.size()) {
-                    ssize_t ret = ::pwrite(fd, xml.data() + written, xml.size() - written,
+                while (written < wbuf.size()) {
+                    ssize_t ret = ::pwrite(fd, wbuf.data() + written,
+                                           wbuf.size() - written,
                                            header_size + pos + written);
                     if (ret < 0) {
                         fprintf(stderr, "pwrite failed: %s\n", strerror(errno));
@@ -479,11 +530,26 @@ int main(int argc, char** argv) {
                     }
                     written += ret;
                 }
+                wbuf.clear();
+            };
+
+            for (size_t i = begin; i < end; i++) {
+                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level,
+                    frag_mz_data, frag_int_data,
+                    didx_idx_col[i], didx_size_col[i],
+                    prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
+
+                pending.push_back({i, wbuf.size()});
+                wbuf.append(bufs.output);
+
+                if (wbuf.size() >= WRITE_BUF_SIZE)
+                    flush();
 
                 size_t p = progress.fetch_add(1) + 1;
                 if (p % progress_step == 0)
                     fprintf(stderr, "\rWriting spectra: %zu / %zu (%zu%%)", p, n_spectra, p * 100 / n_spectra);
             }
+            flush();
         };
 
         std::vector<std::thread> threads;
