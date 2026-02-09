@@ -10,7 +10,10 @@
 #include <atomic>
 #include <thread>
 #include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <zlib.h>
+#include <openssl/evp.h>
 
 // ─── base64 encode ──────────────────────────────────────────────────────────
 static const char b64_table[] =
@@ -63,59 +66,59 @@ static int fmt_float_buf(char* buf, double val, int max_decimals = 6) {
 // 21: int_b64_data
 static constexpr int SPECTRUM_N_SLOTS = 22;
 static const char SPECTRUM_TPL[] =
-"<spectrum index=\"{}\" id=\"index={}\" defaultArrayLength=\"{}\">\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000511\" name=\"ms level\" value=\"2\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000796\" name=\"spectrum title\" value=\"{}.{}.{}.2 File:&quot;&quot;, NativeID:&quot;index={}&quot;\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000130\" name=\"positive scan\" value=\"\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000528\" name=\"lowest observed m/z\" value=\"{}\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000527\" name=\"highest observed m/z\" value=\"{}\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000285\" name=\"total ion current\" value=\"{}\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000504\" name=\"base peak m/z\" value=\"{}\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000505\" name=\"base peak intensity\" value=\"{}\"/>\n"
-"<scanList count=\"1\">\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000795\" name=\"no combination\" value=\"\"/>\n"
-"<scan>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000016\" name=\"scan start time\" value=\"{}\" unitCvRef=\"UO\" unitAccession=\"UO:0000010\" unitName=\"second\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1002815\" name=\"inverse reduced ion mobility\" value=\"{}\" unitCvRef=\"MS\" unitAccession=\"MS:1002814\" unitName=\"volt-second per square centimeter\"/>\n"
-"</scan>\n"
-"</scanList>\n"
-"<precursorList count=\"1\">\n"
-"<precursor>\n"
-"<selectedIonList count=\"1\">\n"
-"<selectedIon>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000744\" name=\"selected ion m/z\" value=\"{}\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000041\" name=\"charge state\" value=\"{}\"/>\n"
-"</selectedIon>\n"
-"</selectedIonList>\n"
-"<activation>\n"
-"</activation>\n"
-"</precursor>\n"
-"</precursorList>\n"
-"<binaryDataArrayList count=\"2\">\n"
-"<binaryDataArray encodedLength=\"{}\">\n"
+"        <spectrum index=\"{}\" id=\"index={}\" defaultArrayLength=\"{}\">\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000511\" name=\"ms level\" value=\"2\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000796\" name=\"spectrum title\" value=\"{}.{}.{}.2 File:&quot;&quot;, NativeID:&quot;index={}&quot;\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000130\" name=\"positive scan\" value=\"\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000528\" name=\"lowest observed m/z\" value=\"{}\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000527\" name=\"highest observed m/z\" value=\"{}\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000285\" name=\"total ion current\" value=\"{}\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000504\" name=\"base peak m/z\" value=\"{}\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000505\" name=\"base peak intensity\" value=\"{}\"/>\n"
+"          <scanList count=\"1\">\n"
+"            <cvParam cvRef=\"MS\" accession=\"MS:1000795\" name=\"no combination\" value=\"\"/>\n"
+"            <scan>\n"
+"              <cvParam cvRef=\"MS\" accession=\"MS:1000016\" name=\"scan start time\" value=\"{}\" unitCvRef=\"UO\" unitAccession=\"UO:0000010\" unitName=\"second\"/>\n"
+"              <cvParam cvRef=\"MS\" accession=\"MS:1002815\" name=\"inverse reduced ion mobility\" value=\"{}\" unitCvRef=\"MS\" unitAccession=\"MS:1002814\" unitName=\"volt-second per square centimeter\"/>\n"
+"            </scan>\n"
+"          </scanList>\n"
+"          <precursorList count=\"1\">\n"
+"            <precursor>\n"
+"              <selectedIonList count=\"1\">\n"
+"                <selectedIon>\n"
+"                  <cvParam cvRef=\"MS\" accession=\"MS:1000744\" name=\"selected ion m/z\" value=\"{}\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n"
+"                  <cvParam cvRef=\"MS\" accession=\"MS:1000041\" name=\"charge state\" value=\"{}\"/>\n"
+"                </selectedIon>\n"
+"              </selectedIonList>\n"
+"              <activation>\n"
+"              </activation>\n"
+"            </precursor>\n"
+"          </precursorList>\n"
+"          <binaryDataArrayList count=\"2\">\n"
+"            <binaryDataArray encodedLength=\"{}\">\n"
 "{}"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n"
-"<binary>{}</binary>\n"
-"</binaryDataArray>\n"
-"<binaryDataArray encodedLength=\"{}\">\n"
+"              <cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n"
+"              <cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n"
+"              <binary>{}</binary>\n"
+"            </binaryDataArray>\n"
+"            <binaryDataArray encodedLength=\"{}\">\n"
 "{}"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n"
-"<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>\n"
-"<binary>{}</binary>\n"
-"</binaryDataArray>\n"
-"</binaryDataArrayList>\n"
-"</spectrum>\n";
+"              <cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n"
+"              <cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>\n"
+"              <binary>{}</binary>\n"
+"            </binaryDataArray>\n"
+"          </binaryDataArrayList>\n"
+"        </spectrum>\n";
 
 // Encoding cvParam lines (constant per run, selected by --numpress flag)
 static const char CV_32BIT_FLOAT[] =
-    "<cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n";
+    "              <cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n";
 static const char CV_NUMPRESS_LINEAR[] =
-    "<cvParam cvRef=\"MS\" accession=\"MS:1002746\" name=\"MS-Numpress linear prediction compression\" value=\"\"/>\n";
+    "              <cvParam cvRef=\"MS\" accession=\"MS:1002746\" name=\"MS-Numpress linear prediction compression\" value=\"\"/>\n";
 static const char CV_NUMPRESS_PIC[] =
-    "<cvParam cvRef=\"MS\" accession=\"MS:1002747\" name=\"MS-Numpress positive integer compression\" value=\"\"/>\n";
+    "              <cvParam cvRef=\"MS\" accession=\"MS:1002747\" name=\"MS-Numpress positive integer compression\" value=\"\"/>\n";
 
 // Parsed template: fixed text segments between {} placeholders
 struct SpectrumTemplate {
@@ -334,73 +337,109 @@ static std::string build_header(const std::string& run_id, size_t n_spectra) {
     s.reserve(4096);
     s += "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
     s += "<indexedmzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd\">\n";
-    s += "<mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"" + run_id + "\" version=\"1.1.0\">\n";
-    s += "<cvList count=\"2\">\n";
-    s += "<cv id=\"MS\" fullName=\"Proteomics Standards Initiative Mass Spectrometry Ontology\" version=\"4.1.41\" URI=\"https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo\"/>\n";
-    s += "<cv id=\"UO\" fullName=\"Unit Ontology\" version=\"09:04:2014\" URI=\"https://raw.githubusercontent.com/bio-ontology-research-group/unit-ontology/master/unit.obo\"/>\n";
-    s += "</cvList>\n";
-    s += "<fileDescription>\n";
-    s += "<fileContent>\n";
-    s += "<cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n";
-    s += "<cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n";
-    s += "</fileContent>\n";
-    s += "<sourceFileList count=\"1\">\n";
-    s += "<sourceFile id=\"" + run_id + ".mgf\" name=\"" + run_id + ".mgf\" location=\"file:///\">\n";
-    s += "<cvParam cvRef=\"MS\" accession=\"MS:1000774\" name=\"multiple peak list nativeID format\" value=\"\"/>\n";
-    s += "<cvParam cvRef=\"MS\" accession=\"MS:1001062\" name=\"Mascot MGF format\" value=\"\"/>\n";
-    s += "</sourceFile>\n";
-    s += "</sourceFileList>\n";
-    s += "</fileDescription>\n";
-    s += "<softwareList count=\"1\">\n";
-    s += "<software id=\"mgf_to_mzml_python\" version=\"1.0\">\n";
-    s += "<cvParam cvRef=\"MS\" accession=\"MS:1000615\" name=\"ProteoWizard software\" value=\"\"/>\n";
-    s += "</software>\n";
-    s += "</softwareList>\n";
-    s += "<instrumentConfigurationList count=\"1\">\n";
-    s += "<instrumentConfiguration id=\"IC\">\n";
-    s += "<cvParam cvRef=\"MS\" accession=\"MS:1000031\" name=\"instrument model\" value=\"\"/>\n";
-    s += "</instrumentConfiguration>\n";
-    s += "</instrumentConfigurationList>\n";
-    s += "<dataProcessingList count=\"1\">\n";
-    s += "<dataProcessing id=\"python_conversion\">\n";
-    s += "<processingMethod order=\"0\" softwareRef=\"mgf_to_mzml_python\">\n";
-    s += "<cvParam cvRef=\"MS\" accession=\"MS:1000544\" name=\"Conversion to mzML\" value=\"\"/>\n";
-    s += "</processingMethod>\n";
-    s += "</dataProcessing>\n";
-    s += "</dataProcessingList>\n";
-    s += "<run id=\"" + run_id + "\" defaultInstrumentConfigurationRef=\"IC\">\n";
+    s += "  <mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"" + run_id + "\" version=\"1.1.0\">\n";
+    s += "    <cvList count=\"2\">\n";
+    s += "      <cv id=\"MS\" fullName=\"Proteomics Standards Initiative Mass Spectrometry Ontology\" version=\"4.1.41\" URI=\"https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo\"/>\n";
+    s += "      <cv id=\"UO\" fullName=\"Unit Ontology\" version=\"09:04:2014\" URI=\"https://raw.githubusercontent.com/bio-ontology-research-group/unit-ontology/master/unit.obo\"/>\n";
+    s += "    </cvList>\n";
+    s += "    <fileDescription>\n";
+    s += "      <fileContent>\n";
+    s += "        <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n";
+    s += "        <cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n";
+    s += "      </fileContent>\n";
+    s += "      <sourceFileList count=\"1\">\n";
+    s += "        <sourceFile id=\"" + run_id + ".mgf\" name=\"" + run_id + ".mgf\" location=\"file:///\">\n";
+    s += "          <cvParam cvRef=\"MS\" accession=\"MS:1000774\" name=\"multiple peak list nativeID format\" value=\"\"/>\n";
+    s += "          <cvParam cvRef=\"MS\" accession=\"MS:1001062\" name=\"Mascot MGF format\" value=\"\"/>\n";
+    s += "        </sourceFile>\n";
+    s += "      </sourceFileList>\n";
+    s += "    </fileDescription>\n";
+    s += "    <softwareList count=\"1\">\n";
+    s += "      <software id=\"mgf_to_mzml_python\" version=\"1.0\">\n";
+    s += "        <cvParam cvRef=\"MS\" accession=\"MS:1000615\" name=\"ProteoWizard software\" value=\"\"/>\n";
+    s += "      </software>\n";
+    s += "    </softwareList>\n";
+    s += "    <instrumentConfigurationList count=\"1\">\n";
+    s += "      <instrumentConfiguration id=\"IC\">\n";
+    s += "        <cvParam cvRef=\"MS\" accession=\"MS:1000031\" name=\"instrument model\" value=\"\"/>\n";
+    s += "      </instrumentConfiguration>\n";
+    s += "    </instrumentConfigurationList>\n";
+    s += "    <dataProcessingList count=\"1\">\n";
+    s += "      <dataProcessing id=\"python_conversion\">\n";
+    s += "        <processingMethod order=\"0\" softwareRef=\"mgf_to_mzml_python\">\n";
+    s += "          <cvParam cvRef=\"MS\" accession=\"MS:1000544\" name=\"Conversion to mzML\" value=\"\"/>\n";
+    s += "        </processingMethod>\n";
+    s += "      </dataProcessing>\n";
+    s += "    </dataProcessingList>\n";
+    s += "    <run id=\"" + run_id + "\" defaultInstrumentConfigurationRef=\"IC\">\n";
     char tmp[128];
-    snprintf(tmp, sizeof(tmp), "<spectrumList count=\"%zu\" defaultDataProcessingRef=\"python_conversion\">\n", n_spectra);
+    snprintf(tmp, sizeof(tmp), "      <spectrumList count=\"%zu\" defaultDataProcessingRef=\"python_conversion\">\n", n_spectra);
     s += tmp;
     return s;
 }
 
 // ─── build footer string ────────────────────────────────────────────────────
 // footer_start_offset = byte position in the file where this footer begins
+static const char CHECKSUM_PLACEHOLDER[] = "0000000000000000000000000000000000000000";
+
 static std::string build_footer(const std::vector<long>& offsets, long footer_start_offset) {
     std::string s;
-    s += "</spectrumList>\n";
-    s += "</run>\n";
-    s += "</mzML>\n";
+    s += "      </spectrumList>\n";
+    s += "    </run>\n";
+    s += "  </mzML>\n";
 
     long index_list_offset = footer_start_offset + (long)s.size();
 
-    s += "<indexList count=\"2\">\n";
-    s += "<index name=\"spectrum\">\n";
+    s += "  <indexList count=\"2\">\n";
+    s += "    <index name=\"spectrum\">\n";
     char tmp[128];
     for (size_t i = 0; i < offsets.size(); i++) {
-        snprintf(tmp, sizeof(tmp), "<offset idRef=\"index=%zu\">%ld</offset>\n", i, offsets[i]);
+        snprintf(tmp, sizeof(tmp), "      <offset idRef=\"index=%zu\">%ld</offset>\n", i, offsets[i]);
         s += tmp;
     }
-    s += "</index>\n";
-    s += "<index name=\"chromatogram\">\n";
-    s += "</index>\n";
-    s += "</indexList>\n";
-    snprintf(tmp, sizeof(tmp), "<indexListOffset>%ld</indexListOffset>\n", index_list_offset);
+    s += "    </index>\n";
+    s += "    <index name=\"chromatogram\">\n";
+    s += "    </index>\n";
+    s += "  </indexList>\n";
+    snprintf(tmp, sizeof(tmp), "  <indexListOffset>%ld</indexListOffset>\n", index_list_offset);
     s += tmp;
-    s += "<fileChecksum>0000000000000000000000000000000000000000</fileChecksum>\n";
+    s += "  <fileChecksum>";
+    s += CHECKSUM_PLACEHOLDER;
+    s += "</fileChecksum>\n";
     s += "</indexedmzML>\n";
     return s;
+}
+
+// ─── SHA1 checksum patching ──────────────────────────────────────────────────
+// Reads the file from offset 0 to hash_end_pos, computes SHA1, writes the
+// 40-char hex digest at patch_pos via pwrite.
+static void patch_sha1_checksum(int fd, off_t hash_end_pos, off_t patch_pos) {
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha1(), NULL);
+
+    const size_t BUF_SZ = 1024 * 1024;
+    std::vector<uint8_t> buf(BUF_SZ);
+    off_t remaining = hash_end_pos;
+    off_t pos = 0;
+    while (remaining > 0) {
+        size_t to_read = (remaining > (off_t)BUF_SZ) ? BUF_SZ : (size_t)remaining;
+        ssize_t n = ::pread(fd, buf.data(), to_read, pos);
+        if (n <= 0) { fprintf(stderr, "pread failed during SHA1\n"); EVP_MD_CTX_free(ctx); return; }
+        EVP_DigestUpdate(ctx, buf.data(), n);
+        pos += n;
+        remaining -= n;
+    }
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_len;
+    EVP_DigestFinal_ex(ctx, digest, &digest_len);
+    EVP_MD_CTX_free(ctx);
+
+    char hex[41];
+    for (unsigned int i = 0; i < digest_len; i++)
+        snprintf(hex + i * 2, 3, "%02x", digest[i]);
+
+    ::pwrite(fd, hex, 40, patch_pos);
 }
 
 // ─── main ───────────────────────────────────────────────────────────────────
@@ -541,7 +580,7 @@ int main(int argc, char** argv) {
 
     } else if (thread_cnt == 1) {
         // ─── Single-threaded path ───────────────────────────────────────
-        FILE* out = fopen(output_path.c_str(), "wb");
+        FILE* out = fopen(output_path.c_str(), "w+b");
         if (!out) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
         setvbuf(out, NULL, _IOFBF, 4 * 1024 * 1024);  // 4MB write buffer
 
@@ -569,11 +608,19 @@ int main(int argc, char** argv) {
         long footer_start = ftell(out);
         std::string footer = build_footer(spectrum_offsets, footer_start);
         fwrite(footer.data(), 1, footer.size(), out);
+        fflush(out);
+
+        // Patch SHA1 checksum: hash everything before the <fileChecksum> line
+        size_t checksum_tag_off = footer.find("  <fileChecksum>");
+        size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
+        off_t hash_end_pos = footer_start + (off_t)checksum_tag_off;
+        off_t patch_pos = footer_start + (off_t)placeholder_off;
+        patch_sha1_checksum(fileno(out), hash_end_pos, patch_pos);
         fclose(out);
 
     } else {
         // ─── Multi-threaded path (two-phase: parallel render, ordered write) ─
-        int fd = ::open(output_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int fd = ::open(output_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
 
         // Write header
@@ -668,6 +715,13 @@ int main(int argc, char** argv) {
         }
 
         ftruncate(fd, footer_off + footer.size());
+
+        // Patch SHA1 checksum: hash everything before the <fileChecksum> line
+        size_t checksum_tag_off = footer.find("  <fileChecksum>");
+        size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
+        off_t hash_end_pos = footer_off + (off_t)checksum_tag_off;
+        off_t patch_pos = footer_off + (off_t)placeholder_off;
+        patch_sha1_checksum(fd, hash_end_pos, patch_pos);
         ::close(fd);
     }
 
