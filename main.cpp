@@ -446,7 +446,7 @@ static void patch_sha1_checksum(int fd, off_t hash_end_pos, off_t patch_pos) {
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run] [--spectra-not-sorted] [--numpress] [--used-spectra-cnt N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run] [--spectra-not-sorted] [--numpress] [--no-sha1] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
@@ -458,6 +458,7 @@ int main(int argc, char** argv) {
     bool dry_run = false;
     bool mz_sorted = true;
     bool use_numpress = false;
+    bool compute_sha1 = true;
     size_t used_spectra_cnt = 0;  // 0 = use all
 
     for (int i = 3; i < argc; i++) {
@@ -476,6 +477,8 @@ int main(int argc, char** argv) {
             mz_sorted = false;
         } else if (strcmp(argv[i], "--numpress") == 0) {
             use_numpress = true;
+        } else if (strcmp(argv[i], "--no-sha1") == 0) {
+            compute_sha1 = false;
         } else if (strcmp(argv[i], "--used-spectra-cnt") == 0 && i + 1 < argc) {
             used_spectra_cnt = (size_t)atol(argv[++i]);
         }
@@ -623,12 +626,14 @@ int main(int argc, char** argv) {
         fwrite(footer.data(), 1, footer.size(), out);
         fflush(out);
 
-        // Patch SHA1 checksum: hash everything before the <fileChecksum> line
-        size_t checksum_tag_off = footer.find("  <fileChecksum>");
-        size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
-        off_t hash_end_pos = footer_start + (off_t)checksum_tag_off;
-        off_t patch_pos = footer_start + (off_t)placeholder_off;
-        patch_sha1_checksum(fileno(out), hash_end_pos, patch_pos);
+        if (compute_sha1) {
+            // Patch SHA1 checksum: hash everything before the <fileChecksum> line
+            size_t checksum_tag_off = footer.find("  <fileChecksum>");
+            size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
+            off_t hash_end_pos = footer_start + (off_t)checksum_tag_off;
+            off_t patch_pos = footer_start + (off_t)placeholder_off;
+            patch_sha1_checksum(fileno(out), hash_end_pos, patch_pos);
+        }
         fclose(out);
 
     } else {
@@ -730,12 +735,14 @@ int main(int argc, char** argv) {
 
         ftruncate(fd, footer_off + footer.size());
 
-        // Patch SHA1 checksum: hash everything before the <fileChecksum> line
-        size_t checksum_tag_off = footer.find("  <fileChecksum>");
-        size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
-        off_t hash_end_pos = footer_off + (off_t)checksum_tag_off;
-        off_t patch_pos = footer_off + (off_t)placeholder_off;
-        patch_sha1_checksum(fd, hash_end_pos, patch_pos);
+        if (compute_sha1) {
+            // Patch SHA1 checksum: hash everything before the <fileChecksum> line
+            size_t checksum_tag_off = footer.find("  <fileChecksum>");
+            size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
+            off_t hash_end_pos = footer_off + (off_t)checksum_tag_off;
+            off_t patch_pos = footer_off + (off_t)placeholder_off;
+            patch_sha1_checksum(fd, hash_end_pos, patch_pos);
+        }
         ::close(fd);
     }
 
