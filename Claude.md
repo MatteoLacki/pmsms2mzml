@@ -68,9 +68,10 @@ tof[idx:idx+max_group_len]
     * ask when adding new entries into it.
 * store outputs in output folder
 
-## Deferred: Numpress compression
-* example/mzML_numpress.py exists as reference but is NOT in scope right now.
-* We will return to Numpress later. For now, use 32-bit float + zlib + base64 only.
+## Numpress compression (implemented)
+* `--numpress` flag uses MS-Numpress algorithms: `encodeLinear` (MS:1002746) for m/z, `encodePic` (MS:1002747) for intensity, followed by zlib + base64.
+* Source: `src/MSNumpress.hpp` + `src/MSNumpress.cpp` (third-party, Apache 2.0).
+* Reference: `example/mzML_numpress.py`.
 
 ## Input files (mmappet format, no parquet dependency)
 
@@ -128,7 +129,7 @@ Schema (9 columns):
 
 Single-file C++ converter. Usage:
 ```
-./myprog <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run]
+./myprog <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run] [--spectra-not-sorted] [--numpress] [--used-spectra-cnt N]
 ```
 
 Example:
@@ -139,31 +140,40 @@ Example:
 Features implemented:
 - Opens fragment data, dataindex, and precursor metadata via mmappet.hpp
 - Writes indexed mzML with spectrum index and chromatogram index
-- 32-bit float + zlib compression + base64 encoding for binary arrays
+- 32-bit float + zlib compression + base64 encoding for binary arrays (default)
+- Optional `--numpress`: MS-Numpress linear (m/z) + positive integer (intensity) compression
 - Per-spectrum stats: lowest/highest mz, TIC, base peak mz/intensity
 - Spectrum title format: `{run_id}.{idx}.{idx}.2 File:"", NativeID:"index={idx}"`
-- CLI args: --precursors-dir (default: `<pmsms_dir>/filtered_precursors_with_nontrivial_ms2.mmappet/`), --run-id, --zlib-level, --threads, --dry-run
-- Multi-threaded: pwrite + atomic position counter, spectra order not guaranteed
+- `--spectra-not-sorted`: disables sorted-mz optimization (default assumes sorted)
+- `--used-spectra-cnt N`: limit output to first N spectra
 - `--dry-run`: computes total output size without file I/O (for benchmarking CPU vs I/O)
+- Multi-threaded: two-phase (parallel render, ordered sequential write), guarantees spectrum indices 0,1,2,... in file order
+- `render_spectrum` separates `seq_idx` (spectrum position in file) from `prec_idx` (precursor identity)
 
 ### Architecture: spectrum XML template
-The repeated per-spectrum XML is defined as a single string (`SPECTRUM_TPL`) with 20 `{}` placeholders, parsed once at startup into fixed segments. `render_spectrum()` formats all values, then interleaves segments and values in a tight loop with one pre-computed `reserve()`.
+The repeated per-spectrum XML is defined as a single string (`SPECTRUM_TPL`) with 22 `{}` placeholders, parsed once at startup into fixed segments. `render_spectrum()` formats all values, then interleaves segments and values in a tight loop with one pre-computed `reserve()`.
+
+### Multi-threaded architecture (two-phase ordered write)
+- **Phase 1 (parallel):** Each thread renders its contiguous chunk of spectra into a per-thread buffer, recording per-spectrum local byte offsets.
+- **Phase 2 (sequential):** After all threads join, write buffers in thread order (T0, T1, ...) via pwrite. Compute final spectrum offsets from thread start positions + local offsets.
+- Guarantees spectrum indices are sequential (0, 1, 2, ...) in file order.
+- Memory: each thread buffers ~(total_output / n_threads). For 3.5 GiB output with 4 threads = ~900 MB/thread.
 
 ### Performance optimizations
 - Persistent zlib stream (`deflateInit2` once + `deflateReset` per spectrum) — avoids 50KB malloc/free per call
-- Batched pwrite: 4MB write buffer per thread (~1000 spectra per write), reduces syscalls from ~1M to ~900
 - `madvise(MADV_SEQUENTIAL)` on input mmap regions for kernel readahead
 - `setvbuf(..., 4MB)` on single-threaded output
+- Sorted m/z optimization: read endpoints for min/max instead of scanning (default on)
 
 ### Benchmarks (F9477: 1,021,494 spectra, 3.49 GiB output, 4 threads)
 | mode | wall | user | sys |
 |------|------|------|-----|
 | dry-run | 13.6s | 47.0s | 0.15s |
-| real write | 18.9s | 47.8s | 5.6s |
+| real write (ordered) | 23.2s | 48.2s | 9.9s |
 
-I/O overhead: ~5.3s (660 MB/s effective write throughput).
+I/O overhead: ~9.6s. Ordered write trades ~4s wall time for guaranteed sequential spectrum indices.
 
-Verified: output matches reference (example_output/tiny.mzml) structurally — 44 spectra, 2074 lines, identical binary data. Minor value differences in metadata are expected (binary f32 precision vs MGF text rounding).
+Verified: single-threaded and multi-threaded outputs are byte-identical on test data (44 spectra). Minor value differences vs reference (example_output/tiny.mzml) in metadata are expected (binary f32 precision vs MGF text rounding).
 
 ## General code quality patterns:
 

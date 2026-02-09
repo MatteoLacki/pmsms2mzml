@@ -47,7 +47,7 @@ static int fmt_float_buf(char* buf, double val, int max_decimals = 6) {
 
 // ─── spectrum XML template ─────────────────────────────────────────────────
 // {} placeholders (22 total, in order):
-//  0-1: index, index
+//  0: spectrum sequential index, 1: precursor id
 //  2:   frag_count
 //  3-6: run_id, index, index, index
 //  7-8: lowest_mz (3 dec), highest_mz (3 dec)
@@ -183,7 +183,8 @@ static void zlib_compress_into(RenderBufs& bufs, const void* data, size_t len) {
 // ─── render one spectrum into bufs.output ───────────────────────────────────
 static void render_spectrum(
     RenderBufs& bufs,
-    size_t i,
+    size_t seq_idx,
+    size_t prec_idx,
     const char* run_id,
     size_t run_id_len,
     int zlib_level,
@@ -267,11 +268,12 @@ static void render_spectrum(
     }
 
     // Format all scalar values
-    char idx_s[32], frag_s[32], charge_s[32], mz_b64l_s[32], int_b64l_s[32];
+    char seq_s[32], idx_s[32], frag_s[32], charge_s[32], mz_b64l_s[32], int_b64l_s[32];
     char low_s[64], high_s[64], tic_s[64], bp_mz_s[64], bp_int_s[64];
     char rt_s[64], iim_s[64], prec_mz_s[64];
 
-    int idx_n     = snprintf(idx_s, sizeof(idx_s), "%zu", i);
+    int seq_n     = snprintf(seq_s, sizeof(seq_s), "%zu", seq_idx);
+    int idx_n     = snprintf(idx_s, sizeof(idx_s), "%zu", prec_idx);
     int frag_n    = snprintf(frag_s, sizeof(frag_s), "%zu", (size_t)frag_count);
     int charge_n  = snprintf(charge_s, sizeof(charge_s), "%u", (unsigned)charge);
     int mz_b64l_n = snprintf(mz_b64l_s, sizeof(mz_b64l_s), "%zu", bufs.mz_b64.size());
@@ -288,8 +290,8 @@ static void render_spectrum(
     // Map template slots to formatted values
     struct V { const char* d; size_t n; };
     V vals[SPECTRUM_N_SLOTS] = {
-        {idx_s,     (size_t)idx_n},              //  0: index
-        {idx_s,     (size_t)idx_n},              //  1: index
+        {seq_s,     (size_t)seq_n},              //  0: spectrum sequential index
+        {idx_s,     (size_t)idx_n},              //  1: precursor id
         {frag_s,    (size_t)frag_n},             //  2: frag_count
         {run_id,    run_id_len},                 //  3: run_id
         {idx_s,     (size_t)idx_n},              //  4: index
@@ -508,7 +510,7 @@ int main(int argc, char** argv) {
         auto worker = [&](size_t begin, size_t end) {
             RenderBufs bufs;
             for (size_t i = begin; i < end; i++) {
-                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                render_spectrum(bufs, i, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                     use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     didx_idx_col[i], didx_size_col[i],
@@ -554,7 +556,7 @@ int main(int argc, char** argv) {
 
             spectrum_offsets[i] = ftell(out);
 
-            render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+            render_spectrum(bufs, i, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                 use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                 frag_mz_data, frag_int_data,
                 didx_idx_col[i], didx_size_col[i],
@@ -570,65 +572,42 @@ int main(int argc, char** argv) {
         fclose(out);
 
     } else {
-        // ─── Multi-threaded path (batched pwrite) ───────────────────────
+        // ─── Multi-threaded path (two-phase: parallel render, ordered write) ─
         int fd = ::open(output_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
 
         // Write header
         ::pwrite(fd, header.data(), header.size(), 0);
 
-        std::atomic<size_t> write_pos{0};
         std::vector<long> spectrum_offsets(n_spectra);
-        constexpr size_t WRITE_BUF_SIZE = 4 * 1024 * 1024;  // 4MB batches
 
-        auto worker = [&](size_t begin, size_t end) {
-            RenderBufs bufs;
+        // Per-thread result: rendered output + local spectrum offsets
+        struct ThreadResult {
             std::string wbuf;
-            wbuf.reserve(WRITE_BUF_SIZE + 64 * 1024);
+            std::vector<std::pair<size_t, size_t>> offsets; // (spectrum_idx, local_offset)
+        };
+        std::vector<ThreadResult> results(thread_cnt);
 
-            // Pending offsets: spectrum index + position within wbuf
-            struct Pending { size_t idx; size_t off; };
-            std::vector<Pending> pending;
-
-            auto flush = [&]() {
-                if (wbuf.empty()) return;
-                size_t pos = write_pos.fetch_add(wbuf.size());
-                for (auto& p : pending)
-                    spectrum_offsets[p.idx] = (long)(header_size + pos + p.off);
-                pending.clear();
-
-                size_t written = 0;
-                while (written < wbuf.size()) {
-                    ssize_t ret = ::pwrite(fd, wbuf.data() + written,
-                                           wbuf.size() - written,
-                                           header_size + pos + written);
-                    if (ret < 0) {
-                        fprintf(stderr, "pwrite failed: %s\n", strerror(errno));
-                        exit(1);
-                    }
-                    written += ret;
-                }
-                wbuf.clear();
-            };
+        // Phase 1: parallel render
+        auto worker = [&](int tid, size_t begin, size_t end) {
+            RenderBufs bufs;
+            ThreadResult& res = results[tid];
+            res.offsets.reserve(end - begin);
 
             for (size_t i = begin; i < end; i++) {
-                render_spectrum(bufs, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                render_spectrum(bufs, i, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                     use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     didx_idx_col[i], didx_size_col[i],
                     prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
 
-                pending.push_back({i, wbuf.size()});
-                wbuf.append(bufs.output);
-
-                if (wbuf.size() >= WRITE_BUF_SIZE)
-                    flush();
+                res.offsets.push_back({i, res.wbuf.size()});
+                res.wbuf.append(bufs.output);
 
                 size_t p = progress.fetch_add(1) + 1;
                 if (p % progress_step == 0)
-                    fprintf(stderr, "\rWriting spectra: %zu / %zu (%zu%%)", p, n_spectra, p * 100 / n_spectra);
+                    fprintf(stderr, "\rRendering spectra: %zu / %zu (%zu%%)", p, n_spectra, p * 100 / n_spectra);
             }
-            flush();
         };
 
         std::vector<std::thread> threads;
@@ -637,16 +616,44 @@ int main(int argc, char** argv) {
         size_t start = 0;
         for (int t = 0; t < thread_cnt; t++) {
             size_t end = start + chunk + (t < (int)remainder ? 1 : 0);
-            threads.emplace_back(worker, start, end);
+            threads.emplace_back(worker, t, start, end);
             start = end;
         }
         for (auto& th : threads) th.join();
 
-        fprintf(stderr, "\rWriting spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
+        fprintf(stderr, "\rRendering spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
 
-        // Write footer at the end
-        size_t body_size = write_pos.load();
-        off_t footer_off = header_size + body_size;
+        // Phase 2: ordered write (thread 0 first, then thread 1, ...)
+        size_t body_pos = 0;
+        for (int t = 0; t < thread_cnt; t++) {
+            ThreadResult& res = results[t];
+            size_t thread_start = header_size + body_pos;
+
+            // Resolve spectrum offsets
+            for (auto& [idx, local_off] : res.offsets)
+                spectrum_offsets[idx] = (long)(thread_start + local_off);
+
+            // Write this thread's buffer
+            size_t written = 0;
+            while (written < res.wbuf.size()) {
+                ssize_t ret = ::pwrite(fd, res.wbuf.data() + written,
+                                       res.wbuf.size() - written,
+                                       thread_start + written);
+                if (ret < 0) {
+                    fprintf(stderr, "pwrite failed: %s\n", strerror(errno));
+                    exit(1);
+                }
+                written += ret;
+            }
+            body_pos += res.wbuf.size();
+
+            // Free memory as we go
+            res.wbuf.clear();
+            res.wbuf.shrink_to_fit();
+        }
+
+        // Write footer
+        off_t footer_off = header_size + body_pos;
         std::string footer = build_footer(spectrum_offsets, (long)footer_off);
 
         size_t written = 0;
@@ -660,7 +667,6 @@ int main(int argc, char** argv) {
             written += ret;
         }
 
-        // Truncate file to exact size
         ftruncate(fd, footer_off + footer.size());
         ::close(fd);
     }
