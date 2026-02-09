@@ -501,12 +501,23 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error: precursor count (%zu) > dataindex count (%zu)\n", n_spectra, n_dataindex);
         return 1;
     }
-    if (used_spectra_cnt > 0 && used_spectra_cnt < n_spectra)
-        n_spectra = used_spectra_cnt;
+    auto& didx_size_col   = didx_ds.get_column<1>();
+
+    // Build list of precursor indices with non-empty fragment data
+    size_t n_candidates = (used_spectra_cnt > 0 && used_spectra_cnt < n_spectra)
+                          ? used_spectra_cnt : n_spectra;
+    std::vector<size_t> valid_idx;
+    valid_idx.reserve(n_candidates);
+    for (size_t i = 0; i < n_candidates; i++) {
+        if (didx_size_col[i] > 0)
+            valid_idx.push_back(i);
+    }
+    n_spectra = valid_idx.size();
+    if (n_candidates != n_spectra)
+        fprintf(stderr, "Skipped %zu empty spectra (0 fragments)\n", n_candidates - n_spectra);
 
     auto& frag_mz_col    = frag_ds.get_column<3>();
     auto& frag_int_col    = frag_ds.get_column<1>();
-    auto& didx_size_col   = didx_ds.get_column<1>();
     auto& didx_idx_col    = didx_ds.get_column<2>();
     auto& prec_iim_col    = prec_ds.get_column<4>();
     auto& prec_mz_col     = prec_ds.get_column<6>();
@@ -549,11 +560,12 @@ int main(int argc, char** argv) {
         auto worker = [&](size_t begin, size_t end) {
             RenderBufs bufs;
             for (size_t i = begin; i < end; i++) {
-                render_spectrum(bufs, i, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                size_t pi = valid_idx[i];
+                render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                     use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
-                    didx_idx_col[i], didx_size_col[i],
-                    prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
+                    didx_idx_col[pi], didx_size_col[pi],
+                    prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
                 total_bytes.fetch_add(bufs.output.size(), std::memory_order_relaxed);
 
                 size_t p = progress.fetch_add(1) + 1;
@@ -595,11 +607,12 @@ int main(int argc, char** argv) {
 
             spectrum_offsets[i] = ftell(out);
 
-            render_spectrum(bufs, i, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+            size_t pi = valid_idx[i];
+            render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                 use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                 frag_mz_data, frag_int_data,
-                didx_idx_col[i], didx_size_col[i],
-                prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
+                didx_idx_col[pi], didx_size_col[pi],
+                prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
 
             fwrite(bufs.output.data(), 1, bufs.output.size(), out);
         }
@@ -642,11 +655,12 @@ int main(int argc, char** argv) {
             res.offsets.reserve(end - begin);
 
             for (size_t i = begin; i < end; i++) {
-                render_spectrum(bufs, i, i, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                size_t pi = valid_idx[i];
+                render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                     use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
-                    didx_idx_col[i], didx_size_col[i],
-                    prec_rt_col[i], prec_mz_col[i], prec_charge_col[i], prec_iim_col[i]);
+                    didx_idx_col[pi], didx_size_col[pi],
+                    prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
 
                 res.offsets.push_back({i, res.wbuf.size()});
                 res.wbuf.append(bufs.output);
