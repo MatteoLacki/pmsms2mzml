@@ -655,15 +655,80 @@ int main(int argc, char** argv) {
         }
         fclose(out);
 
+    } else if (!indexed) {
+        // ─── Multi-threaded mmap path (no indexing, lock-free) ───────────
+        // Estimate file size: header + per-spectrum XML + base64(zlib(fragments)) + footer
+        // Base64 of zlib: worst case zlib expands to input+overhead, base64 adds 33%
+        // Per fragment: 4 bytes (mz) + 4 bytes (int) = 8 bytes raw → ~11 bytes base64
+        size_t total_frags = 0;
+        for (size_t i = 0; i < n_spectra; i++)
+            total_frags += frag_cnt_col[valid_idx[i]];
+        size_t est_size = (header_size + n_spectra * 2000 + total_frags * 12 + 4096) * 2;
+
+        int fd = ::open(output_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
+        ftruncate(fd, est_size);
+
+        uint8_t* map = (uint8_t*)mmap(nullptr, est_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) { fprintf(stderr, "mmap failed: %s\n", strerror(errno)); ::close(fd); return 1; }
+
+        // Write header
+        memcpy(map, header.data(), header_size);
+        std::atomic<size_t> write_pos{header_size};
+
+        auto worker = [&](size_t begin, size_t end) {
+            RenderBufs bufs;
+            for (size_t i = begin; i < end; i++) {
+                size_t pi = valid_idx[i];
+                render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                    use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
+                    frag_mz_data, frag_int_data,
+                    frag_start_col[pi], frag_cnt_col[pi],
+                    prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
+
+                size_t sz = bufs.output.size();
+                size_t pos = write_pos.fetch_add(sz, std::memory_order_relaxed);
+                memcpy(map + pos, bufs.output.data(), sz);
+
+                size_t p = progress.fetch_add(1) + 1;
+                if (p % progress_step == 0)
+                    fprintf(stderr, "\rWriting spectra: %zu / %zu (%zu%%)", p, n_spectra, p * 100 / n_spectra);
+            }
+        };
+
+        std::vector<std::thread> threads;
+        size_t chunk = n_spectra / thread_cnt;
+        size_t remainder = n_spectra % thread_cnt;
+        size_t start = 0;
+        for (int t = 0; t < thread_cnt; t++) {
+            size_t end = start + chunk + (t < (int)remainder ? 1 : 0);
+            threads.emplace_back(worker, start, end);
+            start = end;
+        }
+        for (auto& th : threads) th.join();
+
+        fprintf(stderr, "\rWriting spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
+
+        // Write footer
+        size_t body_end = write_pos.load();
+        std::vector<long> no_offsets;
+        std::string footer = build_footer(no_offsets, 0, false);
+        memcpy(map + body_end, footer.data(), footer.size());
+        size_t actual_size = body_end + footer.size();
+
+        munmap(map, est_size);
+        ftruncate(fd, actual_size);
+        ::close(fd);
+
     } else {
-        // ─── Multi-threaded path (two-phase: parallel render, ordered write) ─
+        // ─── Multi-threaded indexed path (two-phase: parallel render, ordered write) ─
         int fd = ::open(output_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
 
         // Write header
         ::pwrite(fd, header.data(), header.size(), 0);
 
-        std::vector<long> spectrum_offsets(indexed ? n_spectra : 0);
+        std::vector<long> spectrum_offsets(n_spectra);
 
         // Per-thread result: rendered output + local spectrum offsets
         struct ThreadResult {
@@ -676,7 +741,7 @@ int main(int argc, char** argv) {
         auto worker = [&](int tid, size_t begin, size_t end) {
             RenderBufs bufs;
             ThreadResult& res = results[tid];
-            if (indexed) res.offsets.reserve(end - begin);
+            res.offsets.reserve(end - begin);
 
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
@@ -686,7 +751,7 @@ int main(int argc, char** argv) {
                     frag_start_col[pi], frag_cnt_col[pi],
                     prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
 
-                if (indexed) res.offsets.push_back({i, res.wbuf.size()});
+                res.offsets.push_back({i, res.wbuf.size()});
                 res.wbuf.append(bufs.output);
 
                 size_t p = progress.fetch_add(1) + 1;
@@ -715,9 +780,8 @@ int main(int argc, char** argv) {
             size_t thread_start = header_size + body_pos;
 
             // Resolve spectrum offsets
-            if (indexed)
-                for (auto& [idx, local_off] : res.offsets)
-                    spectrum_offsets[idx] = (long)(thread_start + local_off);
+            for (auto& [idx, local_off] : res.offsets)
+                spectrum_offsets[idx] = (long)(thread_start + local_off);
 
             // Write this thread's buffer
             size_t written = 0;
@@ -740,7 +804,7 @@ int main(int argc, char** argv) {
 
         // Write footer
         off_t footer_off = header_size + body_pos;
-        std::string footer = build_footer(spectrum_offsets, (long)footer_off, indexed);
+        std::string footer = build_footer(spectrum_offsets, (long)footer_off, true);
 
         size_t written = 0;
         while (written < footer.size()) {
