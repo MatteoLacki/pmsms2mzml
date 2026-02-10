@@ -239,13 +239,17 @@ static void render_spectrum(
 
     if (!bufs.zstrm_init) bufs.init_zlib(zlib_level);
 
-    // Round m/z values to N decimal places if requested
+    // Truncate m/z values to N decimal places if requested (matches Python MGF pipeline)
     const float* mz_src = &frag_mz_data[frag_offset];
     if (max_decimals > 0) {
         double scale = pow(10.0, max_decimals);
         bufs.mz_rounded.resize(frag_count);
-        for (uint64_t j = 0; j < frag_count; j++)
-            bufs.mz_rounded[j] = (float)(round((double)frag_mz_data[frag_offset + j] * scale) / scale);
+        char tmp[64];
+        for (uint64_t j = 0; j < frag_count; j++) {
+            double truncated = floor((double)frag_mz_data[frag_offset + j] * scale) / scale;
+            snprintf(tmp, sizeof(tmp), "%.*f", max_decimals, truncated);
+            bufs.mz_rounded[j] = strtof(tmp, nullptr);
+        }
         mz_src = bufs.mz_rounded.data();
     }
 
@@ -506,42 +510,29 @@ int main(int argc, char** argv) {
     Schema<uint32_t, uint32_t, float, float> frag_schema("tof", "intensity", "score", "mz");
     auto frag_ds = frag_schema.open_dataset(pmsms_dir);
 
-    Schema<uint64_t, uint64_t, uint64_t, uint32_t, float> didx_schema("ms1idx", "size", "idx", "max_group_len", "avg_group_len");
-    auto didx_ds = didx_schema.open_dataset(pmsms_dir / "dataindex.mmappet");
 
-    Schema<int64_t, int32_t, int32_t, int32_t, double, uint32_t, double, double, uint8_t>
+    Schema<int64_t, int32_t, int32_t, int32_t, double, uint32_t, double, double, uint8_t, uint64_t, uint64_t>
         prec_schema("precursor_id_before_deisotoping", "frame", "scan", "tof",
-                    "inv_ion_mobility", "intensity", "mz", "rt", "charge");
+                    "inv_ion_mobility", "intensity", "mz", "rt", "charge",
+                    "fragment_spectrum_start", "fragment_event_cnt");
     auto prec_ds = prec_schema.open_dataset(precursors_dir);
 
     size_t n_spectra = prec_ds.size();
-    size_t n_dataindex = didx_ds.size();
-    if (n_spectra > n_dataindex) {
-        fprintf(stderr, "Error: precursor count (%zu) > dataindex count (%zu)\n", n_spectra, n_dataindex);
-        return 1;
-    }
-    auto& didx_size_col   = didx_ds.get_column<1>();
 
-    // Build list of precursor indices with non-empty fragment data
-    size_t n_candidates = (used_spectra_cnt > 0 && used_spectra_cnt < n_spectra)
-                          ? used_spectra_cnt : n_spectra;
-    std::vector<size_t> valid_idx;
-    valid_idx.reserve(n_candidates);
-    for (size_t i = 0; i < n_candidates; i++) {
-        if (didx_size_col[i] > 0)
-            valid_idx.push_back(i);
-    }
-    n_spectra = valid_idx.size();
-    if (n_candidates != n_spectra)
-        fprintf(stderr, "Skipped %zu empty spectra (0 fragments)\n", n_candidates - n_spectra);
+    n_spectra = (used_spectra_cnt > 0 && used_spectra_cnt < n_spectra)
+                ? used_spectra_cnt : n_spectra;
+    std::vector<size_t> valid_idx(n_spectra);
+    for (size_t i = 0; i < n_spectra; i++)
+        valid_idx[i] = i;
 
     auto& frag_mz_col    = frag_ds.get_column<3>();
     auto& frag_int_col    = frag_ds.get_column<1>();
-    auto& didx_idx_col    = didx_ds.get_column<2>();
     auto& prec_iim_col    = prec_ds.get_column<4>();
     auto& prec_mz_col     = prec_ds.get_column<6>();
     auto& prec_rt_col     = prec_ds.get_column<7>();
     auto& prec_charge_col = prec_ds.get_column<8>();
+    auto& frag_start_col  = prec_ds.get_column<9>();
+    auto& frag_cnt_col    = prec_ds.get_column<10>();
 
     fprintf(stderr, "Spectra: %zu, Fragments: %zu, Threads: %d\n", n_spectra, frag_mz_col.size(), thread_cnt);
 
@@ -552,8 +543,8 @@ int main(int argc, char** argv) {
     // Hint sequential access on large input arrays (reduces page fault stalls)
     madvise((void*)frag_mz_data,  frag_mz_col.size()  * sizeof(float),    MADV_SEQUENTIAL);
     madvise((void*)frag_int_data, frag_int_col.size()  * sizeof(uint32_t), MADV_SEQUENTIAL);
-    madvise((void*)didx_idx_col.data(),  didx_idx_col.size()  * sizeof(uint64_t), MADV_SEQUENTIAL);
-    madvise((void*)didx_size_col.data(), didx_size_col.size() * sizeof(uint64_t), MADV_SEQUENTIAL);
+    madvise((void*)frag_start_col.data(), frag_start_col.size() * sizeof(uint64_t), MADV_SEQUENTIAL);
+    madvise((void*)frag_cnt_col.data(),  frag_cnt_col.size()  * sizeof(uint64_t), MADV_SEQUENTIAL);
 
     // ─── Build header ───────────────────────────────────────────────────
     std::string header = build_header(run_id, n_spectra);
@@ -583,7 +574,7 @@ int main(int argc, char** argv) {
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
-                    didx_idx_col[pi], didx_size_col[pi],
+                    frag_start_col[pi], frag_cnt_col[pi],
                     prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
                 total_bytes.fetch_add(bufs.output.size(), std::memory_order_relaxed);
 
@@ -630,7 +621,7 @@ int main(int argc, char** argv) {
             render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                 use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                 frag_mz_data, frag_int_data,
-                didx_idx_col[pi], didx_size_col[pi],
+                frag_start_col[pi], frag_cnt_col[pi],
                 prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
 
             fwrite(bufs.output.data(), 1, bufs.output.size(), out);
@@ -680,7 +671,7 @@ int main(int argc, char** argv) {
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
-                    didx_idx_col[pi], didx_size_col[pi],
+                    frag_start_col[pi], frag_cnt_col[pi],
                     prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
 
                 res.offsets.push_back({i, res.wbuf.size()});
