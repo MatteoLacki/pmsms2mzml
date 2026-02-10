@@ -348,12 +348,16 @@ static void render_spectrum(
 }
 
 // ─── build header string ────────────────────────────────────────────────────
-static std::string build_header(const std::string& run_id, size_t n_spectra) {
+static std::string build_header(const std::string& run_id, size_t n_spectra, bool indexed) {
     std::string s;
     s.reserve(4096);
     s += "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
-    s += "<indexedmzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd\">\n";
-    s += "  <mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"" + run_id + "\" version=\"1.1.0\">\n";
+    if (indexed) {
+        s += "<indexedmzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd\">\n";
+        s += "  <mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"" + run_id + "\" version=\"1.1.0\">\n";
+    } else {
+        s += "<mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"" + run_id + "\" version=\"1.1.0\">\n";
+    }
     s += "    <cvList count=\"2\">\n";
     s += "      <cv id=\"MS\" fullName=\"Proteomics Standards Initiative Mass Spectrometry Ontology\" version=\"4.1.41\" URI=\"https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo\"/>\n";
     s += "      <cv id=\"UO\" fullName=\"Unit Ontology\" version=\"09:04:2014\" URI=\"https://raw.githubusercontent.com/bio-ontology-research-group/unit-ontology/master/unit.obo\"/>\n";
@@ -398,10 +402,14 @@ static std::string build_header(const std::string& run_id, size_t n_spectra) {
 // footer_start_offset = byte position in the file where this footer begins
 static const char CHECKSUM_PLACEHOLDER[] = "0000000000000000000000000000000000000000";
 
-static std::string build_footer(const std::vector<long>& offsets, long footer_start_offset) {
+static std::string build_footer(const std::vector<long>& offsets, long footer_start_offset, bool indexed) {
     std::string s;
     s += "      </spectrumList>\n";
     s += "    </run>\n";
+    if (!indexed) {
+        s += "  </mzML>\n";
+        return s;
+    }
     s += "  </mzML>\n";
 
     long index_list_offset = footer_start_offset + (long)s.size();
@@ -462,7 +470,7 @@ static void patch_sha1_checksum(int fd, off_t hash_end_pos, off_t patch_pos) {
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--spectra-not-sorted] [--numpress] [--no-sha1] [--used-spectra-cnt N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--spectra-not-sorted] [--numpress] [--no-index] [--no-sha1] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
@@ -474,6 +482,7 @@ int main(int argc, char** argv) {
     bool dry_run = false;
     bool mz_sorted = true;
     bool use_numpress = false;
+    bool indexed = true;
     bool compute_sha1 = true;
     int max_decimals = 0;  // 0 = no rounding of binary m/z values
     size_t used_spectra_cnt = 0;  // 0 = use all
@@ -494,6 +503,9 @@ int main(int argc, char** argv) {
             mz_sorted = false;
         } else if (strcmp(argv[i], "--numpress") == 0) {
             use_numpress = true;
+        } else if (strcmp(argv[i], "--no-index") == 0) {
+            indexed = false;
+            compute_sha1 = false;
         } else if (strcmp(argv[i], "--no-sha1") == 0) {
             compute_sha1 = false;
         } else if (strcmp(argv[i], "--decimals") == 0 && i + 1 < argc) {
@@ -547,7 +559,7 @@ int main(int argc, char** argv) {
     madvise((void*)frag_cnt_col.data(),  frag_cnt_col.size()  * sizeof(uint64_t), MADV_SEQUENTIAL);
 
     // ─── Build header ───────────────────────────────────────────────────
-    std::string header = build_header(run_id, n_spectra);
+    std::string header = build_header(run_id, n_spectra, indexed);
     size_t header_size = header.size();
 
     // ─── Progress tracking ──────────────────────────────────────────────
@@ -608,14 +620,14 @@ int main(int argc, char** argv) {
 
         fwrite(header.data(), 1, header.size(), out);
 
-        std::vector<long> spectrum_offsets(n_spectra);
+        std::vector<long> spectrum_offsets(indexed ? n_spectra : 0);
         RenderBufs bufs;
 
         for (size_t i = 0; i < n_spectra; i++) {
             if (i % progress_step == 0)
                 fprintf(stderr, "\rWriting spectra: %zu / %zu (%zu%%)", i, n_spectra, i * 100 / n_spectra);
 
-            spectrum_offsets[i] = ftell(out);
+            if (indexed) spectrum_offsets[i] = ftell(out);
 
             size_t pi = valid_idx[i];
             render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
@@ -629,7 +641,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "\rWriting spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
 
         long footer_start = ftell(out);
-        std::string footer = build_footer(spectrum_offsets, footer_start);
+        std::string footer = build_footer(spectrum_offsets, footer_start, indexed);
         fwrite(footer.data(), 1, footer.size(), out);
         fflush(out);
 
@@ -651,7 +663,7 @@ int main(int argc, char** argv) {
         // Write header
         ::pwrite(fd, header.data(), header.size(), 0);
 
-        std::vector<long> spectrum_offsets(n_spectra);
+        std::vector<long> spectrum_offsets(indexed ? n_spectra : 0);
 
         // Per-thread result: rendered output + local spectrum offsets
         struct ThreadResult {
@@ -664,7 +676,7 @@ int main(int argc, char** argv) {
         auto worker = [&](int tid, size_t begin, size_t end) {
             RenderBufs bufs;
             ThreadResult& res = results[tid];
-            res.offsets.reserve(end - begin);
+            if (indexed) res.offsets.reserve(end - begin);
 
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
@@ -674,7 +686,7 @@ int main(int argc, char** argv) {
                     frag_start_col[pi], frag_cnt_col[pi],
                     prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
 
-                res.offsets.push_back({i, res.wbuf.size()});
+                if (indexed) res.offsets.push_back({i, res.wbuf.size()});
                 res.wbuf.append(bufs.output);
 
                 size_t p = progress.fetch_add(1) + 1;
@@ -703,8 +715,9 @@ int main(int argc, char** argv) {
             size_t thread_start = header_size + body_pos;
 
             // Resolve spectrum offsets
-            for (auto& [idx, local_off] : res.offsets)
-                spectrum_offsets[idx] = (long)(thread_start + local_off);
+            if (indexed)
+                for (auto& [idx, local_off] : res.offsets)
+                    spectrum_offsets[idx] = (long)(thread_start + local_off);
 
             // Write this thread's buffer
             size_t written = 0;
@@ -727,7 +740,7 @@ int main(int argc, char** argv) {
 
         // Write footer
         off_t footer_off = header_size + body_pos;
-        std::string footer = build_footer(spectrum_offsets, (long)footer_off);
+        std::string footer = build_footer(spectrum_offsets, (long)footer_off, indexed);
 
         size_t written = 0;
         while (written < footer.size()) {
