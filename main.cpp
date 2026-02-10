@@ -153,6 +153,7 @@ struct RenderBufs {
     z_stream             zstrm;        // reusable zlib stream (avoids malloc/free per call)
     bool                 zstrm_init = false;
     // Numpress buffers
+    std::vector<float>         mz_rounded; // m/z rounded to N decimals
     std::vector<double>        mz_f64;    // float32 → double for numpress
     std::vector<double>        int_f64;   // uint32 → double for numpress
     std::vector<unsigned char> np_buf;    // numpress output (max: 8 + N*5)
@@ -193,6 +194,7 @@ static void render_spectrum(
     int zlib_level,
     bool mz_sorted,
     bool use_numpress,
+    int max_decimals,
     const char* mz_enc_cv, size_t mz_enc_cv_len,
     const char* int_enc_cv, size_t int_enc_cv_len,
     const float* frag_mz_data,
@@ -237,12 +239,22 @@ static void render_spectrum(
 
     if (!bufs.zstrm_init) bufs.init_zlib(zlib_level);
 
+    // Round m/z values to N decimal places if requested
+    const float* mz_src = &frag_mz_data[frag_offset];
+    if (max_decimals > 0) {
+        double scale = pow(10.0, max_decimals);
+        bufs.mz_rounded.resize(frag_count);
+        for (uint64_t j = 0; j < frag_count; j++)
+            bufs.mz_rounded[j] = (float)(round((double)frag_mz_data[frag_offset + j] * scale) / scale);
+        mz_src = bufs.mz_rounded.data();
+    }
+
     if (use_numpress) {
         using namespace ms::numpress::MSNumpress;
         // mz: float32 → double → numpress linear → zlib → base64
         bufs.mz_f64.resize(frag_count);
         for (uint64_t j = 0; j < frag_count; j++)
-            bufs.mz_f64[j] = (double)frag_mz_data[frag_offset + j];
+            bufs.mz_f64[j] = (double)mz_src[j];
         bufs.np_buf.resize(8 + frag_count * 5);
         double fp = optimalLinearFixedPoint(bufs.mz_f64.data(), frag_count);
         size_t np_len = encodeLinear(bufs.mz_f64.data(), frag_count, bufs.np_buf.data(), fp);
@@ -258,8 +270,8 @@ static void render_spectrum(
         zlib_compress_into(bufs, bufs.np_buf.data(), np_len);
         base64_encode_into(bufs.int_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
     } else {
-        // mz: raw float32 → zlib → base64
-        zlib_compress_into(bufs, &frag_mz_data[frag_offset], frag_count * sizeof(float));
+        // mz: float32 → zlib → base64
+        zlib_compress_into(bufs, mz_src, frag_count * sizeof(float));
         base64_encode_into(bufs.mz_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
 
         // intensity: u32 → f32 → zlib → base64
@@ -446,7 +458,7 @@ static void patch_sha1_checksum(int fd, off_t hash_end_pos, off_t patch_pos) {
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--dry-run] [--spectra-not-sorted] [--numpress] [--no-sha1] [--used-spectra-cnt N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--spectra-not-sorted] [--numpress] [--no-sha1] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
@@ -459,6 +471,7 @@ int main(int argc, char** argv) {
     bool mz_sorted = true;
     bool use_numpress = false;
     bool compute_sha1 = true;
+    int max_decimals = 0;  // 0 = no rounding of binary m/z values
     size_t used_spectra_cnt = 0;  // 0 = use all
 
     for (int i = 3; i < argc; i++) {
@@ -479,6 +492,9 @@ int main(int argc, char** argv) {
             use_numpress = true;
         } else if (strcmp(argv[i], "--no-sha1") == 0) {
             compute_sha1 = false;
+        } else if (strcmp(argv[i], "--decimals") == 0 && i + 1 < argc) {
+            max_decimals = atoi(argv[++i]);
+            if (max_decimals < 1) max_decimals = 1;
         } else if (strcmp(argv[i], "--used-spectra-cnt") == 0 && i + 1 < argc) {
             used_spectra_cnt = (size_t)atol(argv[++i]);
         }
@@ -565,7 +581,7 @@ int main(int argc, char** argv) {
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
-                    use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
+                    use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     didx_idx_col[pi], didx_size_col[pi],
                     prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
@@ -612,7 +628,7 @@ int main(int argc, char** argv) {
 
             size_t pi = valid_idx[i];
             render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
-                use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
+                use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                 frag_mz_data, frag_int_data,
                 didx_idx_col[pi], didx_size_col[pi],
                 prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
@@ -662,7 +678,7 @@ int main(int argc, char** argv) {
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
-                    use_numpress, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
+                    use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     didx_idx_col[pi], didx_size_col[pi],
                     prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
