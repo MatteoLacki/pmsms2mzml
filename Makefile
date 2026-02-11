@@ -1,6 +1,6 @@
 CXX      := clang++
-CXXFLAGS := -std=c++20 -O3 -Wall -Isrc -Izlib
-LDFLAGS  := -Lzlib -lz -lpthread -lcrypto
+CXXFLAGS := -std=c++23 -O3 -Wall -Isrc
+LDFLAGS  := -lz -lcrypto
 
 myprog: main.o MSNumpress.o
 	$(CXX) $^ -o $@ $(LDFLAGS)
