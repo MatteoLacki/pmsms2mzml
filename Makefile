@@ -13,11 +13,11 @@ MSNumpress.o: src/MSNumpress.cpp
 
 THREADS ?= 1
 
-test: myprog
+test: pmsms2mzml
 	mkdir -p output
 	./pmsms2mzml input/testcutF9477.mmappet output/tiny_test.mzml --precursors-dir input/filtered_precursors_with_nontrivial_ms2_44.mmappet --run-id tiny --threads $(THREADS)
 
-run: myprog
+run: pmsms2mzml
 	mkdir -p output
 	./pmsms2mzml input/F9477.mmappet output/F9477.mzml --threads $(THREADS)
 

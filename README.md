@@ -53,6 +53,12 @@ The idmap allows remapping search engine results back to the original precursor 
 
 **`--indexed`:** Output is a single indexed mzML file with spectrum offset index.
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+This project includes [MS-Numpress](https://github.com/ms-numpress/ms-numpress) (`src/MSNumpress.cpp`, `src/MSNumpress.hpp`), which is licensed under the Apache License 2.0. See the file headers for details.
+
 ## Input format
 
 Expects a pmsms.mmappet directory with:
