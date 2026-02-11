@@ -583,41 +583,6 @@ int main(int argc, char** argv) {
             total_bytes.load(), total_bytes.load() / (1024.0 * 1024.0 * 1024.0), n_spectra);
         return 0;
 
-    } else if (thread_cnt == 1 && indexed) {
-        // ─── Single-threaded path ───────────────────────────────────────
-        FILE* out = fopen(output_path.c_str(), "w+b");
-        if (!out) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
-        setvbuf(out, NULL, _IOFBF, 4 * 1024 * 1024);  // 4MB write buffer
-
-        fwrite(header.data(), 1, header.size(), out);
-
-        std::vector<long> spectrum_offsets(indexed ? n_spectra : 0);
-        RenderBufs bufs;
-
-        for (size_t i = 0; i < n_spectra; i++) {
-            if (i % progress_step == 0)
-                fprintf(stderr, "\rWriting spectra: %zu / %zu (%zu%%)", i, n_spectra, i * 100 / n_spectra);
-
-            if (indexed) spectrum_offsets[i] = ftell(out);
-
-            size_t pi = valid_idx[i];
-            render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
-                use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
-                frag_mz_data, frag_int_data,
-                frag_start_col[pi], frag_cnt_col[pi],
-                prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
-
-            fwrite(bufs.output.data(), 1, bufs.output.size(), out);
-        }
-        fprintf(stderr, "\rWriting spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
-
-        long footer_start = ftell(out);
-        std::string footer = build_footer(spectrum_offsets, footer_start, indexed);
-        fwrite(footer.data(), 1, footer.size(), out);
-        fflush(out);
-        fclose(out);
-        fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
-
     } else if (!indexed) {
         // ─── Multi-threaded mmap path (no indexing, lock-free) ───────────
         // Estimate file size: header + per-spectrum XML + base64(zlib(fragments)) + footer
