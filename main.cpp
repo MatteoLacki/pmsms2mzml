@@ -14,7 +14,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <zlib.h>
-#include <openssl/evp.h>
 
 // ─── base64 encode ──────────────────────────────────────────────────────────
 static const char b64_table[] =
@@ -409,8 +408,6 @@ static std::string build_header(const std::string& run_id, size_t n_spectra, boo
 
 // ─── build footer string ────────────────────────────────────────────────────
 // footer_start_offset = byte position in the file where this footer begins
-static const char CHECKSUM_PLACEHOLDER[] = "0000000000000000000000000000000000000000";
-
 static std::string build_footer(const std::vector<long>& offsets, long footer_start_offset, bool indexed) {
     std::string s;
     s += "      </spectrumList>\n";
@@ -436,50 +433,15 @@ static std::string build_footer(const std::vector<long>& offsets, long footer_st
     s += "  </indexList>\n";
     snprintf(tmp, sizeof(tmp), "  <indexListOffset>%ld</indexListOffset>\n", index_list_offset);
     s += tmp;
-    s += "  <fileChecksum>";
-    s += CHECKSUM_PLACEHOLDER;
-    s += "</fileChecksum>\n";
     s += "</indexedmzML>\n";
     return s;
-}
-
-// ─── SHA1 checksum patching ──────────────────────────────────────────────────
-// Reads the file from offset 0 to hash_end_pos, computes SHA1, writes the
-// 40-char hex digest at patch_pos via pwrite.
-static void patch_sha1_checksum(int fd, off_t hash_end_pos, off_t patch_pos) {
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(ctx, EVP_sha1(), NULL);
-
-    const size_t BUF_SZ = 1024 * 1024;
-    std::vector<uint8_t> buf(BUF_SZ);
-    off_t remaining = hash_end_pos;
-    off_t pos = 0;
-    while (remaining > 0) {
-        size_t to_read = (remaining > (off_t)BUF_SZ) ? BUF_SZ : (size_t)remaining;
-        ssize_t n = ::pread(fd, buf.data(), to_read, pos);
-        if (n <= 0) { fprintf(stderr, "pread failed during SHA1\n"); EVP_MD_CTX_free(ctx); return; }
-        EVP_DigestUpdate(ctx, buf.data(), n);
-        pos += n;
-        remaining -= n;
-    }
-
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int digest_len;
-    EVP_DigestFinal_ex(ctx, digest, &digest_len);
-    EVP_MD_CTX_free(ctx);
-
-    char hex[41];
-    for (unsigned int i = 0; i < digest_len; i++)
-        snprintf(hex + i * 2, 3, "%02x", digest[i]);
-
-    ::pwrite(fd, hex, 40, patch_pos);
 }
 
 // ─── main ───────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--spectra-not-sorted] [--numpress] [--indexed] [--no-sha1] [--used-spectra-cnt N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--spectra-not-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
@@ -492,7 +454,6 @@ int main(int argc, char** argv) {
     bool mz_sorted = true;
     bool use_numpress = false;
     bool indexed = false;
-    bool compute_sha1 = false;
     int max_decimals = 0;  // 0 = no rounding of binary m/z values
     size_t used_spectra_cnt = 0;  // 0 = use all
 
@@ -514,9 +475,6 @@ int main(int argc, char** argv) {
             use_numpress = true;
         } else if (strcmp(argv[i], "--indexed") == 0) {
             indexed = true;
-            compute_sha1 = true;
-        } else if (strcmp(argv[i], "--no-sha1") == 0) {
-            compute_sha1 = false;
         } else if (strcmp(argv[i], "--decimals") == 0 && i + 1 < argc) {
             max_decimals = atoi(argv[++i]);
             if (max_decimals < 1) max_decimals = 1;
@@ -653,15 +611,6 @@ int main(int argc, char** argv) {
         std::string footer = build_footer(spectrum_offsets, footer_start, indexed);
         fwrite(footer.data(), 1, footer.size(), out);
         fflush(out);
-
-        if (compute_sha1) {
-            // Patch SHA1 checksum: hash everything before the <fileChecksum> line
-            size_t checksum_tag_off = footer.find("  <fileChecksum>");
-            size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
-            off_t hash_end_pos = footer_start + (off_t)checksum_tag_off;
-            off_t patch_pos = footer_start + (off_t)placeholder_off;
-            patch_sha1_checksum(fileno(out), hash_end_pos, patch_pos);
-        }
         fclose(out);
         fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
 
@@ -868,14 +817,6 @@ int main(int argc, char** argv) {
 
         ftruncate(fd, footer_off + footer.size());
 
-        if (compute_sha1) {
-            // Patch SHA1 checksum: hash everything before the <fileChecksum> line
-            size_t checksum_tag_off = footer.find("  <fileChecksum>");
-            size_t placeholder_off = footer.find(CHECKSUM_PLACEHOLDER);
-            off_t hash_end_pos = footer_off + (off_t)checksum_tag_off;
-            off_t patch_pos = footer_off + (off_t)placeholder_off;
-            patch_sha1_checksum(fd, hash_end_pos, patch_pos);
-        }
         ::close(fd);
         fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
     }
