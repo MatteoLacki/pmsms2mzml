@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <atomic>
 #include <thread>
+#include <mutex>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -66,11 +67,11 @@ static int fmt_float_buf(char* buf, double val, int max_decimals = 6) {
 // 21: int_b64_data
 static constexpr int SPECTRUM_N_SLOTS = 22;
 static const char SPECTRUM_TPL[] =
-"        <spectrum index=\"{}\" id=\"index={}\" defaultArrayLength=\"{}\">\n"
+"        <spectrum index=\"{}\" id=\"{}\" defaultArrayLength=\"{}\">\n"
 "          <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n"
 "          <cvParam cvRef=\"MS\" accession=\"MS:1000511\" name=\"ms level\" value=\"2\"/>\n"
 "          <cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n"
-"          <cvParam cvRef=\"MS\" accession=\"MS:1000796\" name=\"spectrum title\" value=\"{}.{}.{}.2 File:&quot;&quot;, NativeID:&quot;index={}&quot;\"/>\n"
+"          <cvParam cvRef=\"MS\" accession=\"MS:1000796\" name=\"spectrum title\" value=\"{}.{}.{}.2 File:&quot;&quot;, NativeID:&quot;{}&quot;\"/>\n"
 "          <cvParam cvRef=\"MS\" accession=\"MS:1000130\" name=\"positive scan\" value=\"\"/>\n"
 "          <cvParam cvRef=\"MS\" accession=\"MS:1000528\" name=\"lowest observed m/z\" value=\"{}\"/>\n"
 "          <cvParam cvRef=\"MS\" accession=\"MS:1000527\" name=\"highest observed m/z\" value=\"{}\"/>\n"
@@ -150,6 +151,7 @@ struct RenderBufs {
     std::string          mz_b64;       // base64 encoded mz data
     std::string          int_b64;      // base64 encoded intensity data
     std::string          output;       // final XML string
+    size_t               slot_offsets[SPECTRUM_N_SLOTS]; // byte offset of each slot value in output
     z_stream             zstrm;        // reusable zlib stream (avoids malloc/free per call)
     bool                 zstrm_init = false;
     // Numpress buffers
@@ -204,7 +206,8 @@ static void render_spectrum(
     double rt,
     double prec_mz,
     uint8_t charge,
-    double iim)
+    double iim,
+    int index_width = 0)
 {
     // Compute per-spectrum stats
     float lowest_mz = 0, highest_mz = 0;
@@ -291,7 +294,9 @@ static void render_spectrum(
     char low_s[64], high_s[64], tic_s[64], bp_mz_s[64], bp_int_s[64];
     char rt_s[64], iim_s[64], prec_mz_s[64];
 
-    int seq_n     = snprintf(seq_s, sizeof(seq_s), "%zu", seq_idx);
+    int seq_n     = (index_width > 0)
+        ? snprintf(seq_s, sizeof(seq_s), "%0*zu", index_width, seq_idx)
+        : snprintf(seq_s, sizeof(seq_s), "%zu", seq_idx);
     int idx_n     = snprintf(idx_s, sizeof(idx_s), "%zu", prec_idx);
     int frag_n    = snprintf(frag_s, sizeof(frag_s), "%zu", (size_t)frag_count);
     int charge_n  = snprintf(charge_s, sizeof(charge_s), "%u", (unsigned)charge);
@@ -308,14 +313,17 @@ static void render_spectrum(
 
     // Map template slots to formatted values
     struct V { const char* d; size_t n; };
+    // When index_width > 0 (mmap path), use padded seq for id/title slots too
+    const char* id_s = (index_width > 0) ? seq_s : idx_s;
+    size_t      id_n = (index_width > 0) ? (size_t)seq_n : (size_t)idx_n;
     V vals[SPECTRUM_N_SLOTS] = {
         {seq_s,     (size_t)seq_n},              //  0: spectrum sequential index
-        {idx_s,     (size_t)idx_n},              //  1: precursor id
+        {id_s,      id_n},                       //  1: id (seq when padded, prec_idx otherwise)
         {frag_s,    (size_t)frag_n},             //  2: frag_count
         {run_id,    run_id_len},                 //  3: run_id
-        {idx_s,     (size_t)idx_n},              //  4: index
-        {idx_s,     (size_t)idx_n},              //  5: index
-        {idx_s,     (size_t)idx_n},              //  6: index
+        {id_s,      id_n},                       //  4: scan in title
+        {id_s,      id_n},                       //  5: scan in title
+        {id_s,      id_n},                       //  6: scan in NativeID
         {low_s,     (size_t)low_n},              //  7: lowest_mz
         {high_s,    (size_t)high_n},             //  8: highest_mz
         {tic_s,     (size_t)tic_n},              //  9: tic
@@ -342,6 +350,7 @@ static void render_spectrum(
     s.reserve(total);
     for (int j = 0; j < SPECTRUM_N_SLOTS; j++) {
         s.append(spectrum_tmpl.segs[j].data, spectrum_tmpl.segs[j].len);
+        bufs.slot_offsets[j] = s.size();
         s.append(vals[j].d, vals[j].n);
     }
     s.append(spectrum_tmpl.segs[SPECTRUM_N_SLOTS].data, spectrum_tmpl.segs[SPECTRUM_N_SLOTS].len);
@@ -612,7 +621,7 @@ int main(int argc, char** argv) {
             total_bytes.load(), total_bytes.load() / (1024.0 * 1024.0 * 1024.0), n_spectra);
         return 0;
 
-    } else if (thread_cnt == 1) {
+    } else if (thread_cnt == 1 && indexed) {
         // ─── Single-threaded path ───────────────────────────────────────
         FILE* out = fopen(output_path.c_str(), "w+b");
         if (!out) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
@@ -654,6 +663,7 @@ int main(int argc, char** argv) {
             patch_sha1_checksum(fileno(out), hash_end_pos, patch_pos);
         }
         fclose(out);
+        fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
 
     } else if (!indexed) {
         // ─── Multi-threaded mmap path (no indexing, lock-free) ───────────
@@ -665,8 +675,11 @@ int main(int argc, char** argv) {
             total_frags += frag_cnt_col[valid_idx[i]];
         size_t est_size = (header_size + n_spectra * 2000 + total_frags * 12 + 4096) * 2;
 
-        int fd = ::open(output_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-        if (fd < 0) { fprintf(stderr, "Cannot open output: %s\n", output_path.c_str()); return 1; }
+        std::filesystem::create_directories(output_path);
+        std::filesystem::path mzml_path = output_path / "mzml.mzML";
+
+        int fd = ::open(mzml_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) { fprintf(stderr, "Cannot open output: %s\n", mzml_path.c_str()); return 1; }
         ftruncate(fd, est_size);
 
         uint8_t* map = (uint8_t*)mmap(nullptr, est_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -674,21 +687,40 @@ int main(int argc, char** argv) {
 
         // Write header
         memcpy(map, header.data(), header_size);
-        std::atomic<size_t> write_pos{header_size};
+        std::mutex order_lock;
+        size_t write_pos = header_size;
+        size_t seq_counter = 0;
+        int index_width = (n_spectra > 0) ? snprintf(nullptr, 0, "%zu", n_spectra - 1) : 1;
+        std::vector<size_t> seq_to_prec(n_spectra);  // mapping: sequential index → precursor index
 
         auto worker = [&](size_t begin, size_t end) {
             RenderBufs bufs;
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
-                render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                render_spectrum(bufs, 0, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     frag_start_col[pi], frag_cnt_col[pi],
-                    prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
+                    prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi],
+                    index_width);
 
                 size_t sz = bufs.output.size();
-                size_t pos = write_pos.fetch_add(sz, std::memory_order_relaxed);
+                size_t pos, seq;
+                {
+                    std::lock_guard<std::mutex> lk(order_lock);
+                    pos = write_pos;
+                    write_pos += sz;
+                    seq = seq_counter++;
+                }
+
+                // Patch zero-padded sequential index into all id/index slots
+                char seq_buf[32];
+                snprintf(seq_buf, sizeof(seq_buf), "%0*zu", index_width, seq);
+                for (int slot : {0, 1, 4, 5, 6})
+                    memcpy(bufs.output.data() + bufs.slot_offsets[slot], seq_buf, index_width);
+
                 memcpy(map + pos, bufs.output.data(), sz);
+                seq_to_prec[seq] = pi;
 
                 size_t p = progress.fetch_add(1) + 1;
                 if (p % progress_step == 0)
@@ -710,7 +742,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "\rWriting spectra: %zu / %zu (100%%)\n", n_spectra, n_spectra);
 
         // Write footer
-        size_t body_end = write_pos.load();
+        size_t body_end = write_pos;
         std::vector<long> no_offsets;
         std::string footer = build_footer(no_offsets, 0, false);
         memcpy(map + body_end, footer.data(), footer.size());
@@ -719,6 +751,23 @@ int main(int argc, char** argv) {
         munmap(map, est_size);
         ftruncate(fd, actual_size);
         ::close(fd);
+
+        // Write id mapping as mmappet (seq_idx → prec_idx)
+        std::filesystem::path map_dir = output_path / "idmap.mmappet";
+        std::filesystem::create_directories(map_dir);
+        {
+            FILE* sf = fopen((map_dir / "schema.txt").c_str(), "w");
+            fprintf(sf, "uint64 prec_idx\n");
+            fclose(sf);
+
+            FILE* bf = fopen((map_dir / "0.bin").c_str(), "wb");
+            std::vector<uint64_t> col(n_spectra);
+            for (size_t i = 0; i < n_spectra; i++) col[i] = (uint64_t)seq_to_prec[i];
+            fwrite(col.data(), sizeof(uint64_t), n_spectra, bf);
+            fclose(bf);
+        }
+        fprintf(stderr, "Wrote id mapping to %s\n", map_dir.c_str());
+        fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
 
     } else {
         // ─── Multi-threaded indexed path (two-phase: parallel render, ordered write) ─
@@ -830,6 +879,7 @@ int main(int argc, char** argv) {
         ::close(fd);
     }
 
-    fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
+    if (!dry_run && indexed)
+        fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
     return 0;
 }
