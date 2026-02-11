@@ -2,7 +2,7 @@ CXX      := clang++
 CXXFLAGS := -std=c++23 -O3 -Wall -Isrc
 LDFLAGS  := -lz
 
-myprog: main.o MSNumpress.o
+pmsms2mzml: main.o MSNumpress.o
 	$(CXX) $^ -o $@ $(LDFLAGS)
 
 main.o: main.cpp
@@ -15,11 +15,11 @@ THREADS ?= 1
 
 test: myprog
 	mkdir -p output
-	./myprog input/testcutF9477.mmappet output/tiny_test.mzml --precursors-dir input/filtered_precursors_with_nontrivial_ms2_44.mmappet --run-id tiny --threads $(THREADS)
+	./pmsms2mzml input/testcutF9477.mmappet output/tiny_test.mzml --precursors-dir input/filtered_precursors_with_nontrivial_ms2_44.mmappet --run-id tiny --threads $(THREADS)
 
 run: myprog
 	mkdir -p output
-	./myprog input/F9477.mmappet output/F9477.mzml --threads $(THREADS)
+	./pmsms2mzml input/F9477.mmappet output/F9477.mzml --threads $(THREADS)
 
 clean:
-	rm -f *.o myprog
+	rm -f *.o pmsms2mzml
