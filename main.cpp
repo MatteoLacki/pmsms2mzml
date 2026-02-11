@@ -1,5 +1,6 @@
 #include "mmappet.hpp"
 #include "MSNumpress.hpp"
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -430,6 +431,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
+
+    auto runtime_start = std::chrono::steady_clock::now();
+
+
     std::filesystem::path pmsms_dir = argv[1];
     std::filesystem::path output_path = argv[2];
     std::filesystem::path precursors_dir = pmsms_dir / "filtered_precursors_with_nontrivial_ms2.mmappet";
@@ -789,6 +794,11 @@ int main(int argc, char** argv) {
         ::close(fd);
         fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
     }
+
+    auto runtime_end = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration<double>(runtime_end - runtime_start);
+
+    fprintf(stdout, "Processing completed successfully in %.2f seconds.\n", duration.count());
 
     return 0;
 }

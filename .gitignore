@@ -6,3 +6,5 @@ myprog
 output
 ve
 zlib
+*.o
+pmsms2mzml
