@@ -479,7 +479,7 @@ static void patch_sha1_checksum(int fd, off_t hash_end_pos, off_t patch_pos) {
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--spectra-not-sorted] [--numpress] [--no-index] [--no-sha1] [--used-spectra-cnt N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--spectra-not-sorted] [--numpress] [--indexed] [--no-sha1] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
@@ -491,8 +491,8 @@ int main(int argc, char** argv) {
     bool dry_run = false;
     bool mz_sorted = true;
     bool use_numpress = false;
-    bool indexed = true;
-    bool compute_sha1 = true;
+    bool indexed = false;
+    bool compute_sha1 = false;
     int max_decimals = 0;  // 0 = no rounding of binary m/z values
     size_t used_spectra_cnt = 0;  // 0 = use all
 
@@ -512,9 +512,9 @@ int main(int argc, char** argv) {
             mz_sorted = false;
         } else if (strcmp(argv[i], "--numpress") == 0) {
             use_numpress = true;
-        } else if (strcmp(argv[i], "--no-index") == 0) {
-            indexed = false;
-            compute_sha1 = false;
+        } else if (strcmp(argv[i], "--indexed") == 0) {
+            indexed = true;
+            compute_sha1 = true;
         } else if (strcmp(argv[i], "--no-sha1") == 0) {
             compute_sha1 = false;
         } else if (strcmp(argv[i], "--decimals") == 0 && i + 1 < argc) {
@@ -877,9 +877,8 @@ int main(int argc, char** argv) {
             patch_sha1_checksum(fd, hash_end_pos, patch_pos);
         }
         ::close(fd);
+        fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
     }
 
-    if (!dry_run && indexed)
-        fprintf(stderr, "Done. Wrote %zu spectra to %s\n", n_spectra, output_path.c_str());
     return 0;
 }
