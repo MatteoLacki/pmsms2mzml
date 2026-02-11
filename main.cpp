@@ -193,7 +193,6 @@ static void render_spectrum(
     const char* run_id,
     size_t run_id_len,
     int zlib_level,
-    bool mz_sorted,
     bool use_numpress,
     int max_decimals,
     const char* mz_enc_cv, size_t mz_enc_cv_len,
@@ -214,8 +213,7 @@ static void render_spectrum(
     float base_peak_mz = 0;
     float base_peak_int = 0;
 
-    if (mz_sorted && frag_count > 0) {
-        // Sorted: lowest/highest from endpoints, only scan intensity
+    if (frag_count > 0) {
         lowest_mz  = frag_mz_data[frag_offset];
         highest_mz = frag_mz_data[frag_offset + frag_count - 1];
         uint64_t best_j = 0;
@@ -225,18 +223,6 @@ static void render_spectrum(
             if (fi > base_peak_int) { base_peak_int = fi; best_j = j; }
         }
         base_peak_mz = frag_mz_data[frag_offset + best_j];
-    } else {
-        for (uint64_t j = 0; j < frag_count; j++) {
-            float mz = frag_mz_data[frag_offset + j];
-            float fi = (float)frag_int_data[frag_offset + j];
-            if (j == 0 || mz < lowest_mz) lowest_mz = mz;
-            if (j == 0 || mz > highest_mz) highest_mz = mz;
-            tic += fi;
-            if (j == 0 || fi > base_peak_int) {
-                base_peak_int = fi;
-                base_peak_mz = mz;
-            }
-        }
     }
 
     if (!bufs.zstrm_init) bufs.init_zlib(zlib_level);
@@ -441,7 +427,7 @@ static std::string build_footer(const std::vector<long>& offsets, long footer_st
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--spectra-not-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
     std::filesystem::path pmsms_dir = argv[1];
@@ -451,7 +437,7 @@ int main(int argc, char** argv) {
     int zlib_level = 1;
     int thread_cnt = 1;
     bool dry_run = false;
-    bool mz_sorted = true;
+    bool check_mz_sorted = false;
     bool use_numpress = false;
     bool indexed = false;
     int max_decimals = 0;  // 0 = no rounding of binary m/z values
@@ -469,8 +455,8 @@ int main(int argc, char** argv) {
             if (thread_cnt < 1) thread_cnt = 1;
         } else if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = true;
-        } else if (strcmp(argv[i], "--spectra-not-sorted") == 0) {
-            mz_sorted = false;
+        } else if (strcmp(argv[i], "--check-mz-sorted") == 0) {
+            check_mz_sorted = true;
         } else if (strcmp(argv[i], "--numpress") == 0) {
             use_numpress = true;
         } else if (strcmp(argv[i], "--indexed") == 0) {
@@ -542,6 +528,24 @@ int main(int argc, char** argv) {
     const char* int_enc_cv = use_numpress ? CV_NUMPRESS_PIC : CV_32BIT_FLOAT;
     size_t int_enc_cv_len  = use_numpress ? sizeof(CV_NUMPRESS_PIC) - 1 : sizeof(CV_32BIT_FLOAT) - 1;
 
+    // Optional: verify all spectra have m/z sorted in ascending order
+    if (check_mz_sorted) {
+        fprintf(stderr, "Checking m/z sort order...\n");
+        for (size_t i = 0; i < n_spectra; i++) {
+            size_t pi = valid_idx[i];
+            uint64_t off = frag_start_col[pi];
+            uint64_t cnt = frag_cnt_col[pi];
+            for (uint64_t j = 1; j < cnt; j++) {
+                if (frag_mz_data[off + j] < frag_mz_data[off + j - 1]) {
+                    fprintf(stderr, "ERROR: spectrum %zu (precursor %zu) has unsorted m/z at fragment %zu: %.6f > %.6f\n",
+                        i, pi, (size_t)j, (double)frag_mz_data[off + j - 1], (double)frag_mz_data[off + j]);
+                    return 1;
+                }
+            }
+        }
+        fprintf(stderr, "All %zu spectra have sorted m/z values.\n", n_spectra);
+    }
+
     if (dry_run) {
         // ─── Dry-run: compute total size, no file I/O ──────────────────
         std::atomic<size_t> total_bytes{header_size};
@@ -550,7 +554,7 @@ int main(int argc, char** argv) {
             RenderBufs bufs;
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
-                render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     frag_start_col[pi], frag_cnt_col[pi],
@@ -597,7 +601,7 @@ int main(int argc, char** argv) {
             if (indexed) spectrum_offsets[i] = ftell(out);
 
             size_t pi = valid_idx[i];
-            render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+            render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                 use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                 frag_mz_data, frag_int_data,
                 frag_start_col[pi], frag_cnt_col[pi],
@@ -646,7 +650,7 @@ int main(int argc, char** argv) {
             RenderBufs bufs;
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
-                render_spectrum(bufs, 0, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                render_spectrum(bufs, 0, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     frag_start_col[pi], frag_cnt_col[pi],
@@ -743,7 +747,7 @@ int main(int argc, char** argv) {
 
             for (size_t i = begin; i < end; i++) {
                 size_t pi = valid_idx[i];
-                render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level, mz_sorted,
+                render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
                     frag_start_col[pi], frag_cnt_col[pi],
