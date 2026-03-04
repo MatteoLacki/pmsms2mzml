@@ -444,8 +444,8 @@ static bool detect_multicharge(const std::filesystem::path& prec_dir) {
 // ─── main ───────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     // Parse CLI args
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <output.mzml> [--precursors-dir DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
+    if (argc < 4) {
+        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
 
@@ -453,8 +453,8 @@ int main(int argc, char** argv) {
 
 
     std::filesystem::path pmsms_dir = argv[1];
-    std::filesystem::path output_path = argv[2];
-    std::filesystem::path precursors_dir = pmsms_dir / "filtered_precursors_with_nontrivial_ms2.mmappet";
+    std::filesystem::path precursors_dir = argv[2];
+    std::filesystem::path output_path = argv[3];
     std::string run_id = output_path.stem().string();
     int zlib_level = 1;
     int thread_cnt = 1;
@@ -465,10 +465,8 @@ int main(int argc, char** argv) {
     int max_decimals = 0;  // 0 = no rounding of binary m/z values
     size_t used_spectra_cnt = 0;  // 0 = use all
 
-    for (int i = 3; i < argc; i++) {
-        if (strcmp(argv[i], "--precursors-dir") == 0 && i + 1 < argc) {
-            precursors_dir = argv[++i];
-        } else if (strcmp(argv[i], "--run-id") == 0 && i + 1 < argc) {
+    for (int i = 4; i < argc; i++) {
+        if (strcmp(argv[i], "--run-id") == 0 && i + 1 < argc) {
             run_id = argv[++i];
         } else if (strcmp(argv[i], "--zlib-level") == 0 && i + 1 < argc) {
             zlib_level = atoi(argv[++i]);

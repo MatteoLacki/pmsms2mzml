@@ -15,11 +15,11 @@ THREADS ?= 1
 
 test: pmsms2mzml
 	mkdir -p output
-	./pmsms2mzml input/testcutF9477.mmappet output/tiny_test.mzml --precursors-dir input/filtered_precursors_with_nontrivial_ms2_44.mmappet --run-id tiny --threads $(THREADS)
+	./pmsms2mzml input/testcutF9477.mmappet input/filtered_precursors_with_nontrivial_ms2_44.mmappet output/tiny_test.mzml --run-id tiny --threads $(THREADS)
 
 run: pmsms2mzml
 	mkdir -p output
-	./pmsms2mzml input/F9477.mmappet output/F9477.mzml --threads $(THREADS)
+	./pmsms2mzml input/F9477.mmappet input/F9477.mmappet/filtered_precursors_with_nontrivial_ms2.mmappet output/F9477.mzml --threads $(THREADS)
 
 tests/test_pmsms2mzml: tests/test_pmsms2mzml.cpp src/mmappet.hpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
