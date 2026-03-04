@@ -21,5 +21,11 @@ run: pmsms2mzml
 	mkdir -p output
 	./pmsms2mzml input/F9477.mmappet output/F9477.mzml --threads $(THREADS)
 
+tests/test_pmsms2mzml: tests/test_pmsms2mzml.cpp src/mmappet.hpp
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+
+test-unit: pmsms2mzml tests/test_pmsms2mzml
+	./tests/test_pmsms2mzml
+
 clean:
-	rm -f *.o pmsms2mzml
+	rm -f *.o pmsms2mzml tests/test_pmsms2mzml

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -424,6 +425,22 @@ static std::string build_footer(const std::vector<long>& offsets, long footer_st
     return s;
 }
 
+// ─── multi-charge helpers ────────────────────────────────────────────────────
+static std::vector<uint8_t> charges_from_int64(int64_t val) {
+    if (val <= 0) return {};
+    std::string s = std::to_string(val);
+    std::vector<uint8_t> out;
+    for (char c : s) out.push_back((uint8_t)(c - '0'));
+    return out;
+}
+
+static bool detect_multicharge(const std::filesystem::path& prec_dir) {
+    std::ifstream f(prec_dir / "schema.txt");
+    std::string line;
+    for (int i = 0; i <= 8 && std::getline(f, line); i++) {}
+    return line == "int64 charges";
+}
+
 // ─── main ───────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     // Parse CLI args
@@ -474,47 +491,86 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ─── Schema detection ────────────────────────────────────────────────
+    bool multicharge = detect_multicharge(precursors_dir);
+
     // ─── Step 1: Open datasets ──────────────────────────────────────────
     fprintf(stderr, "Opening datasets...\n");
 
     Schema<uint32_t, uint32_t, float, float> frag_schema("tof", "intensity", "score", "mz");
     auto frag_ds = frag_schema.open_dataset(pmsms_dir);
 
-
-    Schema<int64_t, int32_t, int32_t, int32_t, double, uint32_t, double, double, uint8_t, uint64_t, uint64_t>
-        prec_schema("precursor_id_before_deisotoping", "frame", "scan", "tof",
-                    "inv_ion_mobility", "intensity", "mz", "rt", "charge",
-                    "fragment_spectrum_start", "fragment_event_cnt");
-    auto prec_ds = prec_schema.open_dataset(precursors_dir);
-
-    size_t n_spectra = prec_ds.size();
-
-    n_spectra = (used_spectra_cnt > 0 && used_spectra_cnt < n_spectra)
-                ? used_spectra_cnt : n_spectra;
-    std::vector<size_t> valid_idx(n_spectra);
-    for (size_t i = 0; i < n_spectra; i++)
-        valid_idx[i] = i;
-
-    auto& frag_mz_col    = frag_ds.get_column<3>();
-    auto& frag_int_col    = frag_ds.get_column<1>();
-    auto& prec_iim_col    = prec_ds.get_column<4>();
-    auto& prec_mz_col     = prec_ds.get_column<6>();
-    auto& prec_rt_col     = prec_ds.get_column<7>();
-    auto& prec_charge_col = prec_ds.get_column<8>();
-    auto& frag_start_col  = prec_ds.get_column<9>();
-    auto& frag_cnt_col    = prec_ds.get_column<10>();
-
-    fprintf(stderr, "Spectra: %zu, Fragments: %zu, Threads: %d\n", n_spectra, frag_mz_col.size(), thread_cnt);
-
-    // Raw data pointers for render_spectrum
+    auto& frag_mz_col  = frag_ds.get_column<3>();
+    auto& frag_int_col = frag_ds.get_column<1>();
     const float*    frag_mz_data  = frag_mz_col.data();
     const uint32_t* frag_int_data = frag_int_col.data();
 
-    // Hint sequential access on large input arrays (reduces page fault stalls)
     madvise((void*)frag_mz_data,  frag_mz_col.size()  * sizeof(float),    MADV_SEQUENTIAL);
     madvise((void*)frag_int_data, frag_int_col.size()  * sizeof(uint32_t), MADV_SEQUENTIAL);
-    madvise((void*)frag_start_col.data(), frag_start_col.size() * sizeof(uint64_t), MADV_SEQUENTIAL);
-    madvise((void*)frag_cnt_col.data(),  frag_cnt_col.size()  * sizeof(uint64_t), MADV_SEQUENTIAL);
+
+    // Flat expanded precursor/charge index vectors (length == n_spectra after expansion)
+    std::vector<double>   prec_iim_vec, prec_mz_vec, prec_rt_vec;
+    std::vector<uint64_t> frag_start_vec, frag_cnt_vec;
+    std::vector<size_t>   effective_prec_idx;
+    std::vector<uint8_t>  effective_charge;
+
+    if (!multicharge) {
+        Schema<int64_t,int32_t,int32_t,int32_t,double,
+               uint32_t,double,double,uint8_t,uint64_t,uint64_t>
+            prec_schema("precursor_id_before_deisotoping","frame","scan","tof",
+                        "inv_ion_mobility","intensity","mz","rt","charge",
+                        "fragment_spectrum_start","fragment_event_cnt");
+        auto prec_ds = prec_schema.open_dataset(precursors_dir);
+        size_t n_prec = prec_ds.size();
+        auto& prec_iim_col    = prec_ds.get_column<4>();
+        auto& prec_mz_col     = prec_ds.get_column<6>();
+        auto& prec_rt_col     = prec_ds.get_column<7>();
+        auto& prec_charge_col = prec_ds.get_column<8>();
+        auto& frag_start_col  = prec_ds.get_column<9>();
+        auto& frag_cnt_col    = prec_ds.get_column<10>();
+        prec_iim_vec.assign(prec_iim_col.data(), prec_iim_col.data() + n_prec);
+        prec_mz_vec.assign(prec_mz_col.data(), prec_mz_col.data() + n_prec);
+        prec_rt_vec.assign(prec_rt_col.data(), prec_rt_col.data() + n_prec);
+        frag_start_vec.assign(frag_start_col.data(), frag_start_col.data() + n_prec);
+        frag_cnt_vec.assign(frag_cnt_col.data(), frag_cnt_col.data() + n_prec);
+        size_t n = (used_spectra_cnt > 0 && used_spectra_cnt < n_prec) ? used_spectra_cnt : n_prec;
+        effective_prec_idx.resize(n);
+        effective_charge.resize(n);
+        for (size_t i = 0; i < n; i++) {
+            effective_prec_idx[i] = i;
+            effective_charge[i]   = prec_charge_col[i];
+        }
+    } else {
+        Schema<int64_t,int32_t,int32_t,int32_t,double,
+               uint32_t,double,double,int64_t,uint64_t,uint64_t>
+            prec_schema_mc("precursor_id_before_deisotoping","frame","scan","tof",
+                           "inv_ion_mobility","intensity","mz","rt","charges",
+                           "fragment_spectrum_start","fragment_event_cnt");
+        auto prec_ds_mc = prec_schema_mc.open_dataset(precursors_dir);
+        size_t n_prec = prec_ds_mc.size();
+        auto& prec_iim_col     = prec_ds_mc.get_column<4>();
+        auto& prec_mz_col      = prec_ds_mc.get_column<6>();
+        auto& prec_rt_col      = prec_ds_mc.get_column<7>();
+        auto& prec_charges_col = prec_ds_mc.get_column<8>();
+        auto& frag_start_col   = prec_ds_mc.get_column<9>();
+        auto& frag_cnt_col     = prec_ds_mc.get_column<10>();
+        prec_iim_vec.assign(prec_iim_col.data(), prec_iim_col.data() + n_prec);
+        prec_mz_vec.assign(prec_mz_col.data(), prec_mz_col.data() + n_prec);
+        prec_rt_vec.assign(prec_rt_col.data(), prec_rt_col.data() + n_prec);
+        frag_start_vec.assign(frag_start_col.data(), frag_start_col.data() + n_prec);
+        frag_cnt_vec.assign(frag_cnt_col.data(), frag_cnt_col.data() + n_prec);
+        size_t n = (used_spectra_cnt > 0 && used_spectra_cnt < n_prec) ? used_spectra_cnt : n_prec;
+        for (size_t pi = 0; pi < n; pi++) {
+            for (uint8_t c : charges_from_int64(prec_charges_col[pi])) {
+                effective_prec_idx.push_back(pi);
+                effective_charge.push_back(c);
+            }
+        }
+    }
+
+    size_t n_spectra = effective_prec_idx.size();
+
+    fprintf(stderr, "Spectra: %zu, Fragments: %zu, Threads: %d\n", n_spectra, frag_mz_col.size(), thread_cnt);
 
     // ─── Build header ───────────────────────────────────────────────────
     std::string header = build_header(run_id, n_spectra, indexed);
@@ -537,9 +593,9 @@ int main(int argc, char** argv) {
     if (check_mz_sorted) {
         fprintf(stderr, "Checking m/z sort order...\n");
         for (size_t i = 0; i < n_spectra; i++) {
-            size_t pi = valid_idx[i];
-            uint64_t off = frag_start_col[pi];
-            uint64_t cnt = frag_cnt_col[pi];
+            size_t pi = effective_prec_idx[i];
+            uint64_t off = frag_start_vec[pi];
+            uint64_t cnt = frag_cnt_vec[pi];
             for (uint64_t j = 1; j < cnt; j++) {
                 if (frag_mz_data[off + j] < frag_mz_data[off + j - 1]) {
                     fprintf(stderr, "ERROR: spectrum %zu (precursor %zu) has unsorted m/z at fragment %zu: %.6f > %.6f\n",
@@ -558,12 +614,12 @@ int main(int argc, char** argv) {
         auto worker = [&](size_t begin, size_t end) {
             RenderBufs bufs;
             for (size_t i = begin; i < end; i++) {
-                size_t pi = valid_idx[i];
+                size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
-                    frag_start_col[pi], frag_cnt_col[pi],
-                    prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
+                    frag_start_vec[pi], frag_cnt_vec[pi],
+                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
                 total_bytes.fetch_add(bufs.output.size(), std::memory_order_relaxed);
 
                 size_t p = progress.fetch_add(1) + 1;
@@ -595,7 +651,7 @@ int main(int argc, char** argv) {
         // Per fragment: 4 bytes (mz) + 4 bytes (int) = 8 bytes raw → ~11 bytes base64
         size_t total_frags = 0;
         for (size_t i = 0; i < n_spectra; i++)
-            total_frags += frag_cnt_col[valid_idx[i]];
+            total_frags += frag_cnt_vec[effective_prec_idx[i]];
         size_t est_size = (header_size + n_spectra * 2000 + total_frags * 12 + 4096) * 2;
 
         std::filesystem::create_directories(output_path);
@@ -619,12 +675,12 @@ int main(int argc, char** argv) {
         auto worker = [&](size_t begin, size_t end) {
             RenderBufs bufs;
             for (size_t i = begin; i < end; i++) {
-                size_t pi = valid_idx[i];
+                size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, 0, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
-                    frag_start_col[pi], frag_cnt_col[pi],
-                    prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi],
+                    frag_start_vec[pi], frag_cnt_vec[pi],
+                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi],
                     index_width);
 
                 size_t sz = bufs.output.size();
@@ -716,12 +772,12 @@ int main(int argc, char** argv) {
             res.offsets.reserve(end - begin);
 
             for (size_t i = begin; i < end; i++) {
-                size_t pi = valid_idx[i];
+                size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_int_data,
-                    frag_start_col[pi], frag_cnt_col[pi],
-                    prec_rt_col[pi], prec_mz_col[pi], prec_charge_col[pi], prec_iim_col[pi]);
+                    frag_start_vec[pi], frag_cnt_vec[pi],
+                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
 
                 res.offsets.push_back({i, res.wbuf.size()});
                 res.wbuf.append(bufs.output);
