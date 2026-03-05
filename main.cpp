@@ -437,8 +437,9 @@ static std::vector<uint8_t> charges_from_int64(int64_t val) {
 static bool detect_multicharge(const std::filesystem::path& prec_dir) {
     std::ifstream f(prec_dir / "schema.txt");
     std::string line;
-    for (int i = 0; i <= 8 && std::getline(f, line); i++) {}
-    return line == "int64 charges";
+    while (std::getline(f, line))
+        if (line == "int64 charges") return true;
+    return false;
 }
 
 // ─── main ───────────────────────────────────────────────────────────────────
