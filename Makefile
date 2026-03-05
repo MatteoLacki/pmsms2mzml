@@ -1,5 +1,5 @@
 CXX      := clang++
-CXXFLAGS := -std=c++23 -O3 -Wall -Isrc -I../mmappet/src/mmappet/cpp/mmappet
+CXXFLAGS := -std=c++23 -O3 -Wall -Isrc
 LDFLAGS  := -lz
 
 pmsms2mzml: main.o MSNumpress.o
