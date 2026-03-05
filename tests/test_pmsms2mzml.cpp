@@ -1,4 +1,4 @@
-#include "../src/mmappet.hpp"
+#include "mmappet.h"
 #include <filesystem>
 #include <fstream>
 #include <cstdlib>

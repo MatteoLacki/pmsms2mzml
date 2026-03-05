@@ -1,5 +1,5 @@
 CXX      := clang++
-CXXFLAGS := -std=c++23 -O3 -Wall -Isrc
+CXXFLAGS := -std=c++23 -O3 -Wall -Isrc -I../mmappet/src/mmappet/cpp/mmappet
 LDFLAGS  := -lz
 
 pmsms2mzml: main.o MSNumpress.o
@@ -21,7 +21,7 @@ run: pmsms2mzml
 	mkdir -p output
 	./pmsms2mzml input/F9477.mmappet input/F9477.mmappet/filtered_precursors_with_nontrivial_ms2.mmappet output/F9477.mzml --threads $(THREADS)
 
-tests/test_pmsms2mzml: tests/test_pmsms2mzml.cpp src/mmappet.hpp
+tests/test_pmsms2mzml: tests/test_pmsms2mzml.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
 
 test-unit: pmsms2mzml tests/test_pmsms2mzml

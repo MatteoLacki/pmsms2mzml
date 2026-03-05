@@ -1,4 +1,4 @@
-#include "mmappet.hpp"
+#include "mmappet.h"
 #include "MSNumpress.hpp"
 #include <chrono>
 #include <cstdio>
@@ -495,11 +495,8 @@ int main(int argc, char** argv) {
     // ─── Step 1: Open datasets ──────────────────────────────────────────
     fprintf(stderr, "Opening datasets...\n");
 
-    Schema<uint32_t, uint32_t, float, float> frag_schema("tof", "intensity", "score", "mz");
-    auto frag_ds = frag_schema.open_dataset(pmsms_dir);
-
-    auto& frag_mz_col  = frag_ds.get_column<3>();
-    auto& frag_int_col = frag_ds.get_column<1>();
+    auto frag_mz_col  = OpenColumn<float>   (pmsms_dir, "mz");
+    auto frag_int_col = OpenColumn<uint32_t>(pmsms_dir, "intensity");
     const float*    frag_mz_data  = frag_mz_col.data();
     const uint32_t* frag_int_data = frag_int_col.data();
 
@@ -512,56 +509,37 @@ int main(int argc, char** argv) {
     std::vector<size_t>   effective_prec_idx;
     std::vector<uint8_t>  effective_charge;
 
-    if (!multicharge) {
-        Schema<int64_t,int32_t,int32_t,int32_t,double,
-               uint32_t,double,double,uint8_t,uint64_t,uint64_t>
-            prec_schema("precursor_id_before_deisotoping","frame","scan","tof",
-                        "inv_ion_mobility","intensity","mz","rt","charge",
-                        "fragment_spectrum_start","fragment_event_cnt");
-        auto prec_ds = prec_schema.open_dataset(precursors_dir);
-        size_t n_prec = prec_ds.size();
-        auto& prec_iim_col    = prec_ds.get_column<4>();
-        auto& prec_mz_col     = prec_ds.get_column<6>();
-        auto& prec_rt_col     = prec_ds.get_column<7>();
-        auto& prec_charge_col = prec_ds.get_column<8>();
-        auto& frag_start_col  = prec_ds.get_column<9>();
-        auto& frag_cnt_col    = prec_ds.get_column<10>();
-        prec_iim_vec.assign(prec_iim_col.data(), prec_iim_col.data() + n_prec);
-        prec_mz_vec.assign(prec_mz_col.data(), prec_mz_col.data() + n_prec);
-        prec_rt_vec.assign(prec_rt_col.data(), prec_rt_col.data() + n_prec);
+    {
+        auto prec_iim_col   = OpenColumn<double>  (precursors_dir, "inv_ion_mobility");
+        auto prec_mz_col    = OpenColumn<double>  (precursors_dir, "mz");
+        auto prec_rt_col    = OpenColumn<double>  (precursors_dir, "rt");
+        auto frag_start_col = OpenColumn<uint64_t>(precursors_dir, "fragment_spectrum_start");
+        auto frag_cnt_col   = OpenColumn<uint64_t>(precursors_dir, "fragment_event_cnt");
+
+        size_t n_prec = prec_iim_col.size();
+        prec_iim_vec.assign  (prec_iim_col.data(),   prec_iim_col.data()   + n_prec);
+        prec_mz_vec.assign   (prec_mz_col.data(),    prec_mz_col.data()    + n_prec);
+        prec_rt_vec.assign   (prec_rt_col.data(),    prec_rt_col.data()    + n_prec);
         frag_start_vec.assign(frag_start_col.data(), frag_start_col.data() + n_prec);
-        frag_cnt_vec.assign(frag_cnt_col.data(), frag_cnt_col.data() + n_prec);
+        frag_cnt_vec.assign  (frag_cnt_col.data(),   frag_cnt_col.data()   + n_prec);
+
         size_t n = (used_spectra_cnt > 0 && used_spectra_cnt < n_prec) ? used_spectra_cnt : n_prec;
-        effective_prec_idx.resize(n);
-        effective_charge.resize(n);
-        for (size_t i = 0; i < n; i++) {
-            effective_prec_idx[i] = i;
-            effective_charge[i]   = prec_charge_col[i];
-        }
-    } else {
-        Schema<int64_t,int32_t,int32_t,int32_t,double,
-               uint32_t,double,double,int64_t,uint64_t,uint64_t>
-            prec_schema_mc("precursor_id_before_deisotoping","frame","scan","tof",
-                           "inv_ion_mobility","intensity","mz","rt","charges",
-                           "fragment_spectrum_start","fragment_event_cnt");
-        auto prec_ds_mc = prec_schema_mc.open_dataset(precursors_dir);
-        size_t n_prec = prec_ds_mc.size();
-        auto& prec_iim_col     = prec_ds_mc.get_column<4>();
-        auto& prec_mz_col      = prec_ds_mc.get_column<6>();
-        auto& prec_rt_col      = prec_ds_mc.get_column<7>();
-        auto& prec_charges_col = prec_ds_mc.get_column<8>();
-        auto& frag_start_col   = prec_ds_mc.get_column<9>();
-        auto& frag_cnt_col     = prec_ds_mc.get_column<10>();
-        prec_iim_vec.assign(prec_iim_col.data(), prec_iim_col.data() + n_prec);
-        prec_mz_vec.assign(prec_mz_col.data(), prec_mz_col.data() + n_prec);
-        prec_rt_vec.assign(prec_rt_col.data(), prec_rt_col.data() + n_prec);
-        frag_start_vec.assign(frag_start_col.data(), frag_start_col.data() + n_prec);
-        frag_cnt_vec.assign(frag_cnt_col.data(), frag_cnt_col.data() + n_prec);
-        size_t n = (used_spectra_cnt > 0 && used_spectra_cnt < n_prec) ? used_spectra_cnt : n_prec;
-        for (size_t pi = 0; pi < n; pi++) {
-            for (uint8_t c : charges_from_int64(prec_charges_col[pi])) {
-                effective_prec_idx.push_back(pi);
-                effective_charge.push_back(c);
+
+        if (!multicharge) {
+            auto prec_charge_col = OpenColumn<uint8_t>(precursors_dir, "charge");
+            effective_prec_idx.resize(n);
+            effective_charge.resize(n);
+            for (size_t i = 0; i < n; i++) {
+                effective_prec_idx[i] = i;
+                effective_charge[i]   = prec_charge_col[i];
+            }
+        } else {
+            auto prec_charges_col = OpenColumn<int64_t>(precursors_dir, "charges");
+            for (size_t pi = 0; pi < n; pi++) {
+                for (uint8_t c : charges_from_int64(prec_charges_col[pi])) {
+                    effective_prec_idx.push_back(pi);
+                    effective_charge.push_back(c);
+                }
             }
         }
     }
