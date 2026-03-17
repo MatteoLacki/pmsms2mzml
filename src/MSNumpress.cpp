@@ -306,7 +306,7 @@ size_t encodeLinear(
 		ints[0] = ints[1];
 		ints[1] = ints[2];
 		if (THROW_ON_OVERFLOW && 
-				data[i] * fixedPoint + 0.5 > LLONG_MAX	) {
+				data[i] * fixedPoint + 0.5 > static_cast<double>(LLONG_MAX)	) {
 			throw "[MSNumpress::encodeLinear] Next number overflows LLONG_MAX.";
 		}
 
