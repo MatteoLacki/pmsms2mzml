@@ -12,6 +12,7 @@
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <memory>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -200,6 +201,9 @@ static void render_spectrum(
     const char* mz_enc_cv, size_t mz_enc_cv_len,
     const char* int_enc_cv, size_t int_enc_cv_len,
     const float* frag_mz_data,
+    const uint32_t* frag_tof_data,
+    const float* tof2mz_data,
+    bool use_tof2mz,
     const uint32_t* frag_int_data,
     uint64_t frag_offset,
     uint64_t frag_count,
@@ -215,30 +219,38 @@ static void render_spectrum(
     float base_peak_mz = 0;
     float base_peak_int = 0;
 
+    auto mz_at = [&](uint64_t idx) -> float {
+        return use_tof2mz ? tof2mz_data[frag_tof_data[idx]] : frag_mz_data[idx];
+    };
+
     if (frag_count > 0) {
-        lowest_mz  = frag_mz_data[frag_offset];
-        highest_mz = frag_mz_data[frag_offset + frag_count - 1];
+        lowest_mz  = mz_at(frag_offset);
+        highest_mz = mz_at(frag_offset + frag_count - 1);
         uint64_t best_j = 0;
         for (uint64_t j = 0; j < frag_count; j++) {
             float fi = (float)frag_int_data[frag_offset + j];
             tic += fi;
             if (fi > base_peak_int) { base_peak_int = fi; best_j = j; }
         }
-        base_peak_mz = frag_mz_data[frag_offset + best_j];
+        base_peak_mz = mz_at(frag_offset + best_j);
     }
 
     if (!bufs.zstrm_init) bufs.init_zlib(zlib_level);
 
     // Truncate m/z values to N decimal places if requested (matches Python MGF pipeline)
-    const float* mz_src = &frag_mz_data[frag_offset];
-    if (max_decimals > 0) {
+    const float* mz_src = use_tof2mz ? nullptr : &frag_mz_data[frag_offset];
+    if (use_tof2mz || max_decimals > 0) {
         double scale = pow(10.0, max_decimals);
         bufs.mz_rounded.resize(frag_count);
         char tmp[64];
         for (uint64_t j = 0; j < frag_count; j++) {
-            double truncated = floor((double)frag_mz_data[frag_offset + j] * scale) / scale;
-            snprintf(tmp, sizeof(tmp), "%.*f", max_decimals, truncated);
-            bufs.mz_rounded[j] = strtof(tmp, nullptr);
+            float mz = mz_at(frag_offset + j);
+            if (max_decimals > 0) {
+                double truncated = floor((double)mz * scale) / scale;
+                snprintf(tmp, sizeof(tmp), "%.*f", max_decimals, truncated);
+                mz = strtof(tmp, nullptr);
+            }
+            bufs.mz_rounded[j] = mz;
         }
         mz_src = bufs.mz_rounded.data();
     }
@@ -446,7 +458,7 @@ static bool detect_multicharge(const std::filesystem::path& prec_dir) {
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--tof2mz DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
 
@@ -465,9 +477,14 @@ int main(int argc, char** argv) {
     bool indexed = false;
     int max_decimals = 0;  // 0 = no rounding of binary m/z values
     size_t used_spectra_cnt = 0;  // 0 = use all
+    bool use_tof2mz = false;
+    std::filesystem::path tof2mz_path;
 
     for (int i = 4; i < argc; i++) {
-        if (strcmp(argv[i], "--run-id") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--tof2mz") == 0 && i + 1 < argc) {
+            tof2mz_path = argv[++i];
+            use_tof2mz = true;
+        } else if (strcmp(argv[i], "--run-id") == 0 && i + 1 < argc) {
             run_id = argv[++i];
         } else if (strcmp(argv[i], "--zlib-level") == 0 && i + 1 < argc) {
             zlib_level = atoi(argv[++i]);
@@ -496,12 +513,46 @@ int main(int argc, char** argv) {
     // ─── Step 1: Open datasets ──────────────────────────────────────────
     fprintf(stderr, "Opening datasets...\n");
 
-    auto frag_mz_col  = OpenColumn<float>   (pmsms_dir, "mz");
+    std::unique_ptr<MMappedData<float>> frag_mz_col;
+    std::unique_ptr<MMappedData<uint32_t>> frag_tof_col;
+    std::unique_ptr<MMappedData<float>> tof2mz_col;
+    if (use_tof2mz) {
+        frag_tof_col = std::make_unique<MMappedData<uint32_t>>(OpenColumn<uint32_t>(pmsms_dir, "tof"));
+        tof2mz_col = std::make_unique<MMappedData<float>>(OpenColumn<float>(tof2mz_path, "x"));
+    } else {
+        frag_mz_col = std::make_unique<MMappedData<float>>(OpenColumn<float>(pmsms_dir, "mz"));
+    }
     auto frag_int_col = OpenColumn<uint32_t>(pmsms_dir, "intensity");
-    const float*    frag_mz_data  = frag_mz_col.data();
+    const float*    frag_mz_data  = use_tof2mz ? nullptr : frag_mz_col->data();
+    const uint32_t* frag_tof_data = use_tof2mz ? frag_tof_col->data() : nullptr;
+    const float*    tof2mz_data   = use_tof2mz ? tof2mz_col->data() : nullptr;
     const uint32_t* frag_int_data = frag_int_col.data();
+    size_t n_fragments = frag_int_col.size();
 
-    madvise((void*)frag_mz_data,  frag_mz_col.size()  * sizeof(float),    MADV_SEQUENTIAL);
+    if (use_tof2mz) {
+        madvise((void*)frag_tof_data, frag_tof_col->size() * sizeof(uint32_t), MADV_SEQUENTIAL);
+        madvise((void*)tof2mz_data,   tof2mz_col->size()   * sizeof(float),    MADV_SEQUENTIAL);
+        if (tof2mz_col->size() == 0) {
+            fprintf(stderr, "ERROR: tof2mz table is empty: %s\n", tof2mz_path.c_str());
+            return 1;
+        }
+        for (size_t i = 1; i < tof2mz_col->size(); i++) {
+            if (tof2mz_data[i] < tof2mz_data[i - 1]) {
+                fprintf(stderr, "ERROR: tof2mz table is not non-decreasing at tof %zu: %.9g > %.9g\n",
+                    i, (double)tof2mz_data[i - 1], (double)tof2mz_data[i]);
+                return 1;
+            }
+        }
+        for (size_t i = 0; i < frag_tof_col->size(); i++) {
+            if ((size_t)frag_tof_data[i] >= tof2mz_col->size()) {
+                fprintf(stderr, "ERROR: fragment tof %u at row %zu is out of bounds for tof2mz length %zu\n",
+                    frag_tof_data[i], i, tof2mz_col->size());
+                return 1;
+            }
+        }
+    } else {
+        madvise((void*)frag_mz_data,  frag_mz_col->size()  * sizeof(float),    MADV_SEQUENTIAL);
+    }
     madvise((void*)frag_int_data, frag_int_col.size()  * sizeof(uint32_t), MADV_SEQUENTIAL);
 
     // Flat expanded precursor/charge index vectors (length == n_spectra after expansion)
@@ -547,7 +598,7 @@ int main(int argc, char** argv) {
 
     size_t n_spectra = effective_prec_idx.size();
 
-    fprintf(stderr, "Spectra: %zu, Fragments: %zu, Threads: %d\n", n_spectra, frag_mz_col.size(), thread_cnt);
+    fprintf(stderr, "Spectra: %zu, Fragments: %zu, Threads: %d\n", n_spectra, n_fragments, thread_cnt);
 
     // ─── Build header ───────────────────────────────────────────────────
     std::string header = build_header(run_id, n_spectra, indexed);
@@ -566,7 +617,9 @@ int main(int argc, char** argv) {
     const char* int_enc_cv = use_numpress ? CV_NUMPRESS_PIC : CV_32BIT_FLOAT;
     size_t int_enc_cv_len  = use_numpress ? sizeof(CV_NUMPRESS_PIC) - 1 : sizeof(CV_32BIT_FLOAT) - 1;
 
-    // Optional: verify all spectra have m/z sorted in ascending order
+    // Optional: verify all spectra have m/z sorted in ascending order.
+    // In tof2mz mode, non-decreasing TOF is sufficient because tof2mz is
+    // checked non-decreasing once above.
     if (check_mz_sorted) {
         fprintf(stderr, "Checking m/z sort order...\n");
         for (size_t i = 0; i < n_spectra; i++) {
@@ -574,7 +627,13 @@ int main(int argc, char** argv) {
             uint64_t off = frag_start_vec[pi];
             uint64_t cnt = frag_cnt_vec[pi];
             for (uint64_t j = 1; j < cnt; j++) {
-                if (frag_mz_data[off + j] < frag_mz_data[off + j - 1]) {
+                if (use_tof2mz) {
+                    if (frag_tof_data[off + j] < frag_tof_data[off + j - 1]) {
+                        fprintf(stderr, "ERROR: spectrum %zu (precursor %zu) has unsorted TOF at fragment %zu: %u > %u\n",
+                            i, pi, (size_t)j, frag_tof_data[off + j - 1], frag_tof_data[off + j]);
+                        return 1;
+                    }
+                } else if (frag_mz_data[off + j] < frag_mz_data[off + j - 1]) {
                     fprintf(stderr, "ERROR: spectrum %zu (precursor %zu) has unsorted m/z at fragment %zu: %.6f > %.6f\n",
                         i, pi, (size_t)j, (double)frag_mz_data[off + j - 1], (double)frag_mz_data[off + j]);
                     return 1;
@@ -594,7 +653,7 @@ int main(int argc, char** argv) {
                 size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
-                    frag_mz_data, frag_int_data,
+                    frag_mz_data, frag_tof_data, tof2mz_data, use_tof2mz, frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
                 total_bytes.fetch_add(bufs.output.size(), std::memory_order_relaxed);
@@ -655,7 +714,7 @@ int main(int argc, char** argv) {
                 size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, 0, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
-                    frag_mz_data, frag_int_data,
+                    frag_mz_data, frag_tof_data, tof2mz_data, use_tof2mz, frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi],
                     index_width);
@@ -752,7 +811,7 @@ int main(int argc, char** argv) {
                 size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
-                    frag_mz_data, frag_int_data,
+                    frag_mz_data, frag_tof_data, tof2mz_data, use_tof2mz, frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
 
