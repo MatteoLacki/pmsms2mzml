@@ -97,6 +97,39 @@ static void write_precursors(const fs::path& dir) {
                  prec_fstart, prec_fcnt);
 }
 
+static void write_dataindex(const fs::path& dir) {
+    uint64_t precursor_idx[N_PREC] = {1, 2, 3};
+    uint64_t size[N_PREC] = {3, 3, 4};
+    uint64_t idx[N_PREC] = {0, 3, 6};
+    Schema<uint64_t, uint64_t, uint64_t> s("precursor_idx", "size", "idx");
+    auto w = s.create_writer(dir);
+    w.write_rows(N_PREC, precursor_idx, size, idx);
+}
+
+static void write_bitpack_lsb(const fs::path& path, const std::vector<bool>& bits) {
+    std::vector<uint8_t> packed((bits.size() + 7) / 8, 0);
+    for (size_t i = 0; i < bits.size(); i++) {
+        if (bits[i]) packed[i / 8] |= uint8_t(1u << (i % 8));
+    }
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(packed.data()), packed.size());
+}
+
+static void write_tof_filter(const fs::path& dir) {
+    fs::create_directories(dir);
+    {
+        std::ofstream meta(dir / "metadata.txt");
+        meta << "n_fragments=" << N_FRAG << "\n"
+             << "n_precursors=" << N_PREC << "\n"
+             << "encoding=bitpacked_lsb_u8\n";
+    }
+    write_bitpack_lsb(dir / "precursor_keep.bin", {true, false, true});
+    write_bitpack_lsb(
+        dir / "fragment_keep.bin",
+        {true, false, true, false, false, false, true, false, false, true}
+    );
+}
+
 // ── base64 + zlib helpers ────────────────────────────────────────────────────
 
 static std::vector<uint8_t> base64_decode(const std::string& in) {
@@ -414,8 +447,10 @@ int main() {
 
     write_fragments(tmp / "pmsms.mmappet");
     write_fragments_tof_only(tmp / "pmsms_tof.mmappet");
+    write_dataindex(tmp / "pmsms_tof.mmappet" / "dataindex.mmappet");
     write_tof2mz(tmp / "tof2mz.mmappet");
     write_precursors(tmp / "precursors.mmappet");
+    write_tof_filter(tmp / "tof_filter");
 
     fs::path out = tmp / "output.mzML";
     std::string cmd =
@@ -465,6 +500,39 @@ int main() {
     }
 
     verify_and_print_arrays(extract_arrays(read_file(out_tof)));
+
+    fs::path out_tof_filtered = tmp / "output_tof_filtered.mzML";
+    std::string cmd_tof_filtered =
+        "./pmsms2mzml " + (tmp / "pmsms_tof.mmappet").string() +
+        " " + (tmp / "precursors.mmappet").string() +
+        " " + out_tof_filtered.string() +
+        " --tof2mz " + (tmp / "tof2mz.mmappet").string() +
+        " --tof_filter_path " + (tmp / "tof_filter").string() +
+        " --run-id tof_filtered_test --threads 1 --indexed";
+
+    printf("\n=== Invoking TOF-filtered converter ===\n%s\n", cmd_tof_filtered.c_str());
+
+    if (system(cmd_tof_filtered.c_str()) != 0) {
+        fprintf(stderr, "pmsms2mzml TOF-filtered run exited with non-zero status\n");
+        return 1;
+    }
+
+    std::string filtered_xml = read_file(out_tof_filtered);
+    assert(has(filtered_xml, "spectrumList count=\"2\""));
+    auto filtered_spectra = extract_arrays(filtered_xml);
+    assert(filtered_spectra.size() == 2);
+    assert(filtered_spectra[0].mz.size() == 2);
+    assert(filtered_spectra[0].intensity.size() == 2);
+    assert(filtered_spectra[1].mz.size() == 2);
+    assert(filtered_spectra[1].intensity.size() == 2);
+    assert(filtered_spectra[0].mz[0] == 100.125f);
+    assert(filtered_spectra[0].mz[1] == 300.5f);
+    assert(filtered_spectra[0].intensity[0] == 100.f);
+    assert(filtered_spectra[0].intensity[1] == 300.f);
+    assert(filtered_spectra[1].mz[0] == 120.125f);
+    assert(filtered_spectra[1].mz[1] == 420.0f);
+    assert(filtered_spectra[1].intensity[0] == 700.f);
+    assert(filtered_spectra[1].intensity[1] == 1000.f);
 
     std::string cmd_tof_numpress =
         "./pmsms2mzml " + (tmp / "pmsms_tof.mmappet").string() +

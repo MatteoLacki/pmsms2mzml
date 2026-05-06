@@ -13,6 +13,9 @@
 #include <thread>
 #include <mutex>
 #include <memory>
+#include <iterator>
+#include <sstream>
+#include <stdexcept>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -149,6 +152,8 @@ static SpectrumTemplate spectrum_tmpl;
 // ─── reusable per-thread buffers ────────────────────────────────────────────
 struct RenderBufs {
     std::vector<float>   int_f32;      // intensity float32 conversion
+    std::vector<float>   mz_filtered;  // compacted filtered m/z values
+    std::vector<uint32_t> int_filtered; // compacted filtered intensity values
     std::vector<uint8_t> zlib_out;     // reusable zlib output
     std::string          mz_b64;       // base64 encoded mz data
     std::string          int_b64;      // base64 encoded intensity data
@@ -188,6 +193,72 @@ static void zlib_compress_into(RenderBufs& bufs, const void* data, size_t len) {
     bufs.zlib_out.resize(s.total_out);
 }
 
+static std::vector<uint8_t> unpack_lsb_bits(const std::filesystem::path& path, size_t n_bits) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) throw std::runtime_error("Cannot open bitpack file: " + path.string());
+    std::vector<uint8_t> packed((std::istreambuf_iterator<char>(f)), {});
+    size_t need = (n_bits + 7) / 8;
+    if (packed.size() < need) throw std::runtime_error("Bitpack file too short: " + path.string());
+
+    std::vector<uint8_t> bits(n_bits);
+    for (size_t i = 0; i < n_bits; i++) bits[i] = (packed[i / 8] >> (i % 8)) & 1u;
+    return bits;
+}
+
+static std::string metadata_value(const std::filesystem::path& path, const std::string& key) {
+    std::ifstream f(path);
+    if (!f.is_open()) throw std::runtime_error("Cannot open filter metadata: " + path.string());
+    std::string line;
+    while (std::getline(f, line)) {
+        size_t pos = line.find('=');
+        if (pos == std::string::npos) continue;
+        if (line.substr(0, pos) == key) return line.substr(pos + 1);
+    }
+    throw std::runtime_error("Missing metadata key '" + key + "' in " + path.string());
+}
+
+struct TofFilter {
+    bool enabled = false;
+    std::vector<uint8_t> precursor_keep;
+    std::vector<uint8_t> fragment_keep;
+
+    bool keep_fragment(uint64_t idx) const {
+        return !enabled || (idx < fragment_keep.size() && fragment_keep[idx]);
+    }
+};
+
+static TofFilter load_tof_filter(const std::filesystem::path& filter_path, size_t n_fragments) {
+    TofFilter filter;
+    if (filter_path.empty()) return filter;
+
+    const auto meta_path = filter_path / "metadata.txt";
+    const std::string encoding = metadata_value(meta_path, "encoding");
+    if (encoding != "bitpacked_lsb_u8") {
+        throw std::runtime_error("Unsupported tof filter encoding: " + encoding);
+    }
+
+    size_t n_filter_prec = std::stoull(metadata_value(meta_path, "n_precursors"));
+    size_t n_filter_frag = std::stoull(metadata_value(meta_path, "n_fragments"));
+    if (n_filter_frag != n_fragments) {
+        std::ostringstream msg;
+        msg << "tof filter fragment count mismatch: filter=" << n_filter_frag
+            << " pmsms=" << n_fragments;
+        throw std::runtime_error(msg.str());
+    }
+
+    filter.precursor_keep = unpack_lsb_bits(filter_path / "precursor_keep.bin", n_filter_prec);
+    filter.fragment_keep = unpack_lsb_bits(filter_path / "fragment_keep.bin", n_filter_frag);
+    filter.enabled = true;
+    return filter;
+}
+
+static uint64_t count_kept_fragments(const TofFilter& filter, uint64_t offset, uint64_t count) {
+    if (!filter.enabled) return count;
+    uint64_t kept = 0;
+    for (uint64_t j = 0; j < count; j++) kept += filter.keep_fragment(offset + j) ? 1 : 0;
+    return kept;
+}
+
 // ─── render one spectrum into bufs.output ───────────────────────────────────
 static void render_spectrum(
     RenderBufs& bufs,
@@ -207,6 +278,7 @@ static void render_spectrum(
     const uint32_t* frag_int_data,
     uint64_t frag_offset,
     uint64_t frag_count,
+    const TofFilter* tof_filter,
     double rt,
     double prec_mz,
     uint8_t charge,
@@ -223,28 +295,50 @@ static void render_spectrum(
         return use_tof2mz ? tof2mz_data[frag_tof_data[idx]] : frag_mz_data[idx];
     };
 
+    const bool use_filter = tof_filter && tof_filter->enabled;
+    if (use_filter) {
+        bufs.mz_filtered.clear();
+        bufs.int_filtered.clear();
+        bufs.mz_filtered.reserve(frag_count);
+        bufs.int_filtered.reserve(frag_count);
+        for (uint64_t j = 0; j < frag_count; j++) {
+            uint64_t idx = frag_offset + j;
+            if (!tof_filter->keep_fragment(idx)) continue;
+            bufs.mz_filtered.push_back(mz_at(idx));
+            bufs.int_filtered.push_back(frag_int_data[idx]);
+        }
+        frag_count = bufs.mz_filtered.size();
+    }
+
+    auto kept_mz_at = [&](uint64_t j) -> float {
+        return use_filter ? bufs.mz_filtered[j] : mz_at(frag_offset + j);
+    };
+    auto kept_int_at = [&](uint64_t j) -> uint32_t {
+        return use_filter ? bufs.int_filtered[j] : frag_int_data[frag_offset + j];
+    };
+
     if (frag_count > 0) {
-        lowest_mz  = mz_at(frag_offset);
-        highest_mz = mz_at(frag_offset + frag_count - 1);
+        lowest_mz  = kept_mz_at(0);
+        highest_mz = kept_mz_at(frag_count - 1);
         uint64_t best_j = 0;
         for (uint64_t j = 0; j < frag_count; j++) {
-            float fi = (float)frag_int_data[frag_offset + j];
+            float fi = (float)kept_int_at(j);
             tic += fi;
             if (fi > base_peak_int) { base_peak_int = fi; best_j = j; }
         }
-        base_peak_mz = mz_at(frag_offset + best_j);
+        base_peak_mz = kept_mz_at(best_j);
     }
 
     if (!bufs.zstrm_init) bufs.init_zlib(zlib_level);
 
     // Truncate m/z values to N decimal places if requested (matches Python MGF pipeline)
-    const float* mz_src = use_tof2mz ? nullptr : &frag_mz_data[frag_offset];
-    if (use_tof2mz || max_decimals > 0) {
+    const float* mz_src = use_filter ? bufs.mz_filtered.data() : (use_tof2mz ? nullptr : &frag_mz_data[frag_offset]);
+    if (use_filter || use_tof2mz || max_decimals > 0) {
         double scale = pow(10.0, max_decimals);
         bufs.mz_rounded.resize(frag_count);
         char tmp[64];
         for (uint64_t j = 0; j < frag_count; j++) {
-            float mz = mz_at(frag_offset + j);
+            float mz = kept_mz_at(j);
             if (max_decimals > 0) {
                 double truncated = floor((double)mz * scale) / scale;
                 snprintf(tmp, sizeof(tmp), "%.*f", max_decimals, truncated);
@@ -270,7 +364,7 @@ static void render_spectrum(
         // intensity: u32 → double → numpress pic → zlib → base64
         bufs.int_f64.resize(frag_count);
         for (uint64_t j = 0; j < frag_count; j++)
-            bufs.int_f64[j] = (double)frag_int_data[frag_offset + j];
+            bufs.int_f64[j] = (double)kept_int_at(j);
         bufs.np_buf.resize(frag_count * 5);
         np_len = encodePic(bufs.int_f64.data(), frag_count, bufs.np_buf.data());
         zlib_compress_into(bufs, bufs.np_buf.data(), np_len);
@@ -283,7 +377,7 @@ static void render_spectrum(
         // intensity: u32 → f32 → zlib → base64
         bufs.int_f32.resize(frag_count);
         for (uint64_t j = 0; j < frag_count; j++)
-            bufs.int_f32[j] = (float)frag_int_data[frag_offset + j];
+            bufs.int_f32[j] = (float)kept_int_at(j);
         zlib_compress_into(bufs, bufs.int_f32.data(), frag_count * sizeof(float));
         base64_encode_into(bufs.int_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
     }
@@ -458,7 +552,7 @@ static bool detect_multicharge(const std::filesystem::path& prec_dir) {
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--tof2mz DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--tof2mz DIR] [--tof_filter_path DIR] [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N]\n", argv[0]);
         return 1;
     }
 
@@ -479,11 +573,14 @@ int main(int argc, char** argv) {
     size_t used_spectra_cnt = 0;  // 0 = use all
     bool use_tof2mz = false;
     std::filesystem::path tof2mz_path;
+    std::filesystem::path tof_filter_path;
 
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "--tof2mz") == 0 && i + 1 < argc) {
             tof2mz_path = argv[++i];
             use_tof2mz = true;
+        } else if (strcmp(argv[i], "--tof_filter_path") == 0 && i + 1 < argc) {
+            tof_filter_path = argv[++i];
         } else if (strcmp(argv[i], "--run-id") == 0 && i + 1 < argc) {
             run_id = argv[++i];
         } else if (strcmp(argv[i], "--zlib-level") == 0 && i + 1 < argc) {
@@ -528,6 +625,7 @@ int main(int argc, char** argv) {
     const float*    tof2mz_data   = use_tof2mz ? tof2mz_col->data() : nullptr;
     const uint32_t* frag_int_data = frag_int_col.data();
     size_t n_fragments = frag_int_col.size();
+    TofFilter tof_filter = load_tof_filter(tof_filter_path, n_fragments);
 
     if (use_tof2mz) {
         madvise((void*)frag_tof_data, frag_tof_col->size() * sizeof(uint32_t), MADV_SEQUENTIAL);
@@ -575,19 +673,44 @@ int main(int argc, char** argv) {
         frag_start_vec.assign(frag_start_col.data(), frag_start_col.data() + n_prec);
         frag_cnt_vec.assign  (frag_cnt_col.data(),   frag_cnt_col.data()   + n_prec);
 
+        std::vector<uint8_t> precursor_keep_by_row(n_prec, 1);
+        if (tof_filter.enabled) {
+            auto didx_idx_col = OpenColumn<uint64_t>(pmsms_dir / "dataindex.mmappet", "idx");
+            if (didx_idx_col.size() != tof_filter.precursor_keep.size()) {
+                std::ostringstream msg;
+                msg << "tof filter precursor count mismatch: filter="
+                    << tof_filter.precursor_keep.size()
+                    << " dataindex=" << didx_idx_col.size();
+                throw std::runtime_error(msg.str());
+            }
+
+            size_t didx_j = 0;
+            for (size_t pi = 0; pi < n_prec; pi++) {
+                const uint64_t frag_start = frag_start_vec[pi];
+                while (didx_j < didx_idx_col.size() && didx_idx_col[didx_j] < frag_start) didx_j++;
+                if (didx_j == didx_idx_col.size() || didx_idx_col[didx_j] != frag_start) {
+                    std::ostringstream msg;
+                    msg << "No dataindex row for precursor row " << pi
+                        << " fragment_spectrum_start=" << frag_start;
+                    throw std::runtime_error(msg.str());
+                }
+                precursor_keep_by_row[pi] = tof_filter.precursor_keep[didx_j];
+            }
+        }
+
         size_t n = (used_spectra_cnt > 0 && used_spectra_cnt < n_prec) ? used_spectra_cnt : n_prec;
 
         if (!multicharge) {
             auto prec_charge_col = OpenColumn<uint8_t>(precursors_dir, "charge");
-            effective_prec_idx.resize(n);
-            effective_charge.resize(n);
             for (size_t i = 0; i < n; i++) {
-                effective_prec_idx[i] = i;
-                effective_charge[i]   = prec_charge_col[i];
+                if (!precursor_keep_by_row[i]) continue;
+                effective_prec_idx.push_back(i);
+                effective_charge.push_back(prec_charge_col[i]);
             }
         } else {
             auto prec_charges_col = OpenColumn<int64_t>(precursors_dir, "charges");
             for (size_t pi = 0; pi < n; pi++) {
+                if (!precursor_keep_by_row[pi]) continue;
                 for (uint8_t c : charges_from_int64(prec_charges_col[pi])) {
                     effective_prec_idx.push_back(pi);
                     effective_charge.push_back(c);
@@ -654,7 +777,7 @@ int main(int argc, char** argv) {
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_tof_data, tof2mz_data, use_tof2mz, frag_int_data,
-                    frag_start_vec[pi], frag_cnt_vec[pi],
+                    frag_start_vec[pi], frag_cnt_vec[pi], &tof_filter,
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
                 total_bytes.fetch_add(bufs.output.size(), std::memory_order_relaxed);
 
@@ -687,7 +810,11 @@ int main(int argc, char** argv) {
         // Per fragment: 4 bytes (mz) + 4 bytes (int) = 8 bytes raw → ~11 bytes base64
         size_t total_frags = 0;
         for (size_t i = 0; i < n_spectra; i++)
-            total_frags += frag_cnt_vec[effective_prec_idx[i]];
+            total_frags += count_kept_fragments(
+                tof_filter,
+                frag_start_vec[effective_prec_idx[i]],
+                frag_cnt_vec[effective_prec_idx[i]]
+            );
         size_t est_size = (header_size + n_spectra * 2000 + total_frags * 12 + 4096) * 2;
 
         std::filesystem::create_directories(output_path);
@@ -715,7 +842,7 @@ int main(int argc, char** argv) {
                 render_spectrum(bufs, 0, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_tof_data, tof2mz_data, use_tof2mz, frag_int_data,
-                    frag_start_vec[pi], frag_cnt_vec[pi],
+                    frag_start_vec[pi], frag_cnt_vec[pi], &tof_filter,
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi],
                     index_width);
 
@@ -812,7 +939,7 @@ int main(int argc, char** argv) {
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
                     use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz_data, frag_tof_data, tof2mz_data, use_tof2mz, frag_int_data,
-                    frag_start_vec[pi], frag_cnt_vec[pi],
+                    frag_start_vec[pi], frag_cnt_vec[pi], &tof_filter,
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
 
                 res.offsets.push_back({i, res.wbuf.size()});
