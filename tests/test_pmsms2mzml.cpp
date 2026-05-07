@@ -106,28 +106,43 @@ static void write_dataindex(const fs::path& dir) {
     w.write_rows(N_PREC, precursor_idx, size, idx);
 }
 
-static void write_bitpack_lsb(const fs::path& path, const std::vector<bool>& bits) {
-    std::vector<uint8_t> packed((bits.size() + 7) / 8, 0);
-    for (size_t i = 0; i < bits.size(); i++) {
-        if (bits[i]) packed[i / 8] |= uint8_t(1u << (i % 8));
-    }
-    std::ofstream f(path, std::ios::binary);
-    f.write(reinterpret_cast<const char*>(packed.data()), packed.size());
+static void write_filtered_fragments_tof_only(const fs::path& dir) {
+    uint32_t tof[4] = {0, 6, 4, 9};
+    uint32_t intensity[4] = {100, 300, 800, 1000};
+    float score[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+    Schema<uint32_t, uint32_t, float> s("tof", "intensity", "score");
+    auto w = s.create_writer(dir);
+    w.write_rows(4, tof, intensity, score);
 }
 
-static void write_tof_filter(const fs::path& dir) {
-    fs::create_directories(dir);
-    {
-        std::ofstream meta(dir / "metadata.txt");
-        meta << "n_fragments=" << N_FRAG << "\n"
-             << "n_precursors=" << N_PREC << "\n"
-             << "encoding=bitpacked_lsb_u8\n";
-    }
-    write_bitpack_lsb(dir / "precursor_keep.bin", {true, false, true});
-    write_bitpack_lsb(
-        dir / "fragment_keep.bin",
-        {true, false, true, false, false, false, true, false, false, true}
-    );
+static void write_filtered_dataindex(const fs::path& dir) {
+    uint64_t precursor_idx[2] = {1, 3};
+    uint64_t size[2] = {2, 2};
+    uint64_t idx[2] = {0, 2};
+    Schema<uint64_t, uint64_t, uint64_t> s("precursor_idx", "size", "idx");
+    auto w = s.create_writer(dir);
+    w.write_rows(2, precursor_idx, size, idx);
+}
+
+static void write_filtered_precursors(const fs::path& dir) {
+    int64_t pid[2] = {1, 3};
+    int32_t frame[2] = {10, 30};
+    int32_t scan[2] = {1, 3};
+    int32_t tof[2] = {100, 300};
+    double iim[2] = {0.5, 0.7};
+    uint32_t inten[2] = {1000, 3000};
+    double mz[2] = {500.123, 700.789};
+    double rt[2] = {60.0, 180.0};
+    uint8_t charge[2] = {2, 2};
+    uint64_t fstart[2] = {0, 2};
+    uint64_t fcnt[2] = {2, 2};
+    Schema<int64_t, int32_t, int32_t, int32_t, double,
+           uint32_t, double, double, uint8_t, uint64_t, uint64_t>
+        s("precursor_id_before_deisotoping", "frame", "scan", "tof",
+          "inv_ion_mobility", "intensity", "mz", "rt", "charge",
+          "fragment_spectrum_start", "fragment_event_cnt");
+    auto w = s.create_writer(dir);
+    w.write_rows(2, pid, frame, scan, tof, iim, inten, mz, rt, charge, fstart, fcnt);
 }
 
 // ── base64 + zlib helpers ────────────────────────────────────────────────────
@@ -448,9 +463,11 @@ int main() {
     write_fragments(tmp / "pmsms.mmappet");
     write_fragments_tof_only(tmp / "pmsms_tof.mmappet");
     write_dataindex(tmp / "pmsms_tof.mmappet" / "dataindex.mmappet");
+    write_filtered_fragments_tof_only(tmp / "pmsms_tof_filtered.mmappet");
+    write_filtered_dataindex(tmp / "pmsms_tof_filtered.mmappet" / "dataindex.mmappet");
     write_tof2mz(tmp / "tof2mz.mmappet");
     write_precursors(tmp / "precursors.mmappet");
-    write_tof_filter(tmp / "tof_filter");
+    write_filtered_precursors(tmp / "precursors_filtered.mmappet");
 
     fs::path out = tmp / "output.mzML";
     std::string cmd =
@@ -503,14 +520,13 @@ int main() {
 
     fs::path out_tof_filtered = tmp / "output_tof_filtered.mzML";
     std::string cmd_tof_filtered =
-        "./pmsms2mzml " + (tmp / "pmsms_tof.mmappet").string() +
-        " " + (tmp / "precursors.mmappet").string() +
+        "./pmsms2mzml " + (tmp / "pmsms_tof_filtered.mmappet").string() +
+        " " + (tmp / "precursors_filtered.mmappet").string() +
         " " + out_tof_filtered.string() +
         " --tof2mz " + (tmp / "tof2mz.mmappet").string() +
-        " --tof_filter_path " + (tmp / "tof_filter").string() +
         " --run-id tof_filtered_test --threads 1 --indexed";
 
-    printf("\n=== Invoking TOF-filtered converter ===\n%s\n", cmd_tof_filtered.c_str());
+    printf("\n=== Invoking physically TOF-filtered converter ===\n%s\n", cmd_tof_filtered.c_str());
 
     if (system(cmd_tof_filtered.c_str()) != 0) {
         fprintf(stderr, "pmsms2mzml TOF-filtered run exited with non-zero status\n");
@@ -529,9 +545,9 @@ int main() {
     assert(filtered_spectra[0].mz[1] == 300.5f);
     assert(filtered_spectra[0].intensity[0] == 100.f);
     assert(filtered_spectra[0].intensity[1] == 300.f);
-    assert(filtered_spectra[1].mz[0] == 120.125f);
+    assert(filtered_spectra[1].mz[0] == 220.25f);
     assert(filtered_spectra[1].mz[1] == 420.0f);
-    assert(filtered_spectra[1].intensity[0] == 700.f);
+    assert(filtered_spectra[1].intensity[0] == 800.f);
     assert(filtered_spectra[1].intensity[1] == 1000.f);
 
     std::string cmd_tof_numpress =
