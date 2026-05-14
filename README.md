@@ -57,6 +57,8 @@ The idmap allows remapping search engine results back to the original precursor 
 
 MIT. See [LICENSE](LICENSE).
 
+This project uses [zlib](https://zlib.net/), which is licensed under the zlib License. See [zlib_license.md](zlib_license.md).
+
 This project includes [MS-Numpress](https://github.com/ms-numpress/ms-numpress) (`src/MSNumpress.cpp`, `src/MSNumpress.hpp`), which is licensed under the Apache License 2.0. See the file headers for details.
 
 ## Input format
