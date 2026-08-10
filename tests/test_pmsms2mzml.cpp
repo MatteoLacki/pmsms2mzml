@@ -23,9 +23,6 @@ static float    frag_score[N_FRAG]     = {0.5f,0.5f,0.5f,0.5f,0.5f,0.5f,0.5f,0.5
 static float    frag_mz[N_FRAG]        = {100.125f,200.25f,300.5f,
                                            150.125f,250.25f,350.5f,
                                            120.125f,220.25f,320.5f,420.0f};
-static float    tof2mz_axis[N_FRAG]     = {100.125f,120.125f,150.125f,
-                                           200.25f,220.25f,250.25f,
-                                           300.5f,320.5f,350.5f,420.0f};
 
 static int64_t  prec_pid[N_PREC]    = {1, 2, 3};
 static int32_t  prec_frame[N_PREC]  = {10, 20, 30};
@@ -73,18 +70,6 @@ static void write_fragments(const fs::path& dir) {
     w.write_rows(N_FRAG, frag_tof, frag_intensity, frag_score, frag_mz);
 }
 
-static void write_fragments_tof_only(const fs::path& dir) {
-    Schema<uint32_t, uint32_t, float> s("tof", "intensity", "score");
-    auto w = s.create_writer(dir);
-    w.write_rows(N_FRAG, frag_tof, frag_intensity, frag_score);
-}
-
-static void write_tof2mz(const fs::path& dir) {
-    Schema<float> s("x");
-    auto w = s.create_writer(dir);
-    w.write_rows(N_FRAG, tof2mz_axis);
-}
-
 static void write_precursors(const fs::path& dir) {
     Schema<int64_t, int32_t, int32_t, int32_t, double,
            uint32_t, double, double, uint8_t, uint64_t, uint64_t>
@@ -106,13 +91,14 @@ static void write_dataindex(const fs::path& dir) {
     w.write_rows(N_PREC, precursor_idx, size, idx);
 }
 
-static void write_filtered_fragments_tof_only(const fs::path& dir) {
+static void write_filtered_fragments(const fs::path& dir) {
     uint32_t tof[4] = {0, 6, 4, 9};
     uint32_t intensity[4] = {100, 300, 800, 1000};
     float score[4] = {0.5f, 0.5f, 0.5f, 0.5f};
-    Schema<uint32_t, uint32_t, float> s("tof", "intensity", "score");
+    float mz[4] = {100.125f, 300.5f, 220.25f, 420.0f};
+    Schema<uint32_t, uint32_t, float, float> s("tof", "intensity", "score", "mz");
     auto w = s.create_writer(dir);
-    w.write_rows(4, tof, intensity, score);
+    w.write_rows(4, tof, intensity, score, mz);
 }
 
 static void write_filtered_dataindex(const fs::path& dir) {
@@ -272,8 +258,6 @@ static uint32_t mc_frag_intensity[MC_N_FRAG] = {100,200,300,400,500,600};
 static float    mc_frag_score[MC_N_FRAG]     = {0.5f,0.5f,0.5f,0.5f,0.5f,0.5f};
 static float    mc_frag_mz[MC_N_FRAG]        = {100.125f,200.25f,300.5f,
                                                  150.125f,250.25f,350.5f};
-static float    mc_tof2mz_axis[MC_N_FRAG]    = {100.125f,150.125f,200.25f,
-                                                 250.25f,300.5f,350.5f};
 
 static int64_t  mc_prec_pid[MC_N_PREC]     = {1, 2};
 static int32_t  mc_prec_frame[MC_N_PREC]   = {10, 20};
@@ -333,17 +317,6 @@ static void run_charges_test() {
         auto w = s.create_writer(tmp / "mc_pmsms.mmappet");
         w.write_rows(MC_N_FRAG, mc_frag_tof, mc_frag_intensity, mc_frag_score, mc_frag_mz);
     }
-    {
-        Schema<uint32_t, uint32_t, float> s("tof", "intensity", "score");
-        auto w = s.create_writer(tmp / "mc_pmsms_tof.mmappet");
-        w.write_rows(MC_N_FRAG, mc_frag_tof, mc_frag_intensity, mc_frag_score);
-    }
-    {
-        Schema<float> s("x");
-        auto w = s.create_writer(tmp / "mc_tof2mz.mmappet");
-        w.write_rows(MC_N_FRAG, mc_tof2mz_axis);
-    }
-
     // Write precursor dataset with int64 charges column
     {
         Schema<int64_t,int32_t,int32_t,int32_t,double,
@@ -421,32 +394,6 @@ static void run_charges_test() {
 
     assert(all_ok && "charges binary array mismatch");
 
-    fs::path out_tof = tmp / "mc_tof_output.mzML";
-    std::string cmd_tof =
-        "./pmsms2mzml " + (tmp / "mc_pmsms_tof.mmappet").string() +
-        " " + (tmp / "mc_precursors.mmappet").string() +
-        " " + out_tof.string() +
-        " --tof2mz " + (tmp / "mc_tof2mz.mmappet").string() +
-        " --run-id mc_tof_test --threads 1 --indexed";
-
-    printf("\n=== Invoking TOF-backed converter ===\n%s\n", cmd_tof.c_str());
-
-    if (system(cmd_tof.c_str()) != 0) {
-        fprintf(stderr, "pmsms2mzml TOF-backed run exited with non-zero status\n");
-        exit(1);
-    }
-
-    auto tof_spectra = extract_arrays(read_file(out_tof));
-    assert(tof_spectra.size() == 3);
-    for (int s = 0; s < 3; ++s) {
-        for (int f = 0; f < 3; ++f) {
-            float dm = (f < (int)tof_spectra[s].mz.size()) ? tof_spectra[s].mz[f] : -1.f;
-            float di = (f < (int)tof_spectra[s].intensity.size()) ? tof_spectra[s].intensity[f] : -1.f;
-            assert(dm == exp_mz_arr[s][f]);
-            assert(di == exp_int_arr[s][f]);
-        }
-    }
-
     printf("\ncharges test passed.\n");
     fs::remove_all(tmp);
 }
@@ -461,11 +408,8 @@ int main() {
     fs::remove_all(tmp);
 
     write_fragments(tmp / "pmsms.mmappet");
-    write_fragments_tof_only(tmp / "pmsms_tof.mmappet");
-    write_dataindex(tmp / "pmsms_tof.mmappet" / "dataindex.mmappet");
-    write_filtered_fragments_tof_only(tmp / "pmsms_tof_filtered.mmappet");
-    write_filtered_dataindex(tmp / "pmsms_tof_filtered.mmappet" / "dataindex.mmappet");
-    write_tof2mz(tmp / "tof2mz.mmappet");
+    write_filtered_fragments(tmp / "pmsms_filtered.mmappet");
+    write_filtered_dataindex(tmp / "pmsms_filtered.mmappet" / "dataindex.mmappet");
     write_precursors(tmp / "precursors.mmappet");
     write_filtered_precursors(tmp / "precursors_filtered.mmappet");
 
@@ -474,7 +418,7 @@ int main() {
         "./pmsms2mzml " + (tmp / "pmsms.mmappet").string() +
         " " + (tmp / "precursors.mmappet").string() +
         " " + out.string() +
-        " --run-id test --threads 1 --indexed";
+        " --run-id test --threads 1 --indexed --check-mz-sorted";
 
     printf("\n=== Invoking converter ===\n%s\n", cmd.c_str());
 
@@ -501,39 +445,21 @@ int main() {
     // ── binary array assertions ───────────────────────────────────────────────
     verify_and_print_arrays(extract_arrays(xml));
 
-    fs::path out_tof = tmp / "output_tof.mzML";
-    std::string cmd_tof =
-        "./pmsms2mzml " + (tmp / "pmsms_tof.mmappet").string() +
-        " " + (tmp / "precursors.mmappet").string() +
-        " " + out_tof.string() +
-        " --tof2mz " + (tmp / "tof2mz.mmappet").string() +
-        " --run-id tof_test --threads 1 --indexed --check-mz-sorted";
-
-    printf("\n=== Invoking TOF-backed converter ===\n%s\n", cmd_tof.c_str());
-
-    if (system(cmd_tof.c_str()) != 0) {
-        fprintf(stderr, "pmsms2mzml TOF-backed run exited with non-zero status\n");
-        return 1;
-    }
-
-    verify_and_print_arrays(extract_arrays(read_file(out_tof)));
-
-    fs::path out_tof_filtered = tmp / "output_tof_filtered.mzML";
-    std::string cmd_tof_filtered =
-        "./pmsms2mzml " + (tmp / "pmsms_tof_filtered.mmappet").string() +
+    fs::path out_filtered = tmp / "output_filtered.mzML";
+    std::string cmd_filtered =
+        "./pmsms2mzml " + (tmp / "pmsms_filtered.mmappet").string() +
         " " + (tmp / "precursors_filtered.mmappet").string() +
-        " " + out_tof_filtered.string() +
-        " --tof2mz " + (tmp / "tof2mz.mmappet").string() +
-        " --run-id tof_filtered_test --threads 1 --indexed";
+        " " + out_filtered.string() +
+        " --run-id filtered_test --threads 1 --indexed";
 
-    printf("\n=== Invoking physically TOF-filtered converter ===\n%s\n", cmd_tof_filtered.c_str());
+    printf("\n=== Invoking physically filtered converter ===\n%s\n", cmd_filtered.c_str());
 
-    if (system(cmd_tof_filtered.c_str()) != 0) {
-        fprintf(stderr, "pmsms2mzml TOF-filtered run exited with non-zero status\n");
+    if (system(cmd_filtered.c_str()) != 0) {
+        fprintf(stderr, "pmsms2mzml filtered run exited with non-zero status\n");
         return 1;
     }
 
-    std::string filtered_xml = read_file(out_tof_filtered);
+    std::string filtered_xml = read_file(out_filtered);
     assert(has(filtered_xml, "spectrumList count=\"2\""));
     auto filtered_spectra = extract_arrays(filtered_xml);
     assert(filtered_spectra.size() == 2);
@@ -550,17 +476,16 @@ int main() {
     assert(filtered_spectra[1].intensity[0] == 800.f);
     assert(filtered_spectra[1].intensity[1] == 1000.f);
 
-    std::string cmd_tof_numpress =
-        "./pmsms2mzml " + (tmp / "pmsms_tof.mmappet").string() +
+    std::string cmd_numpress =
+        "./pmsms2mzml " + (tmp / "pmsms.mmappet").string() +
         " " + (tmp / "precursors.mmappet").string() +
-        " " + (tmp / "output_tof_numpress.mzML").string() +
-        " --tof2mz " + (tmp / "tof2mz.mmappet").string() +
-        " --run-id tof_numpress_test --threads 1 --dry-run --numpress";
+        " " + (tmp / "output_numpress.mzML").string() +
+        " --run-id numpress_test --threads 1 --dry-run --numpress";
 
-    printf("\n=== Invoking TOF-backed Numpress dry-run ===\n%s\n", cmd_tof_numpress.c_str());
+    printf("\n=== Invoking Numpress dry-run ===\n%s\n", cmd_numpress.c_str());
 
-    if (system(cmd_tof_numpress.c_str()) != 0) {
-        fprintf(stderr, "pmsms2mzml TOF-backed Numpress dry-run exited with non-zero status\n");
+    if (system(cmd_numpress.c_str()) != 0) {
+        fprintf(stderr, "pmsms2mzml Numpress dry-run exited with non-zero status\n");
         return 1;
     }
 
