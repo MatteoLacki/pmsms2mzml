@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <format>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -363,53 +364,61 @@ static void render_spectrum(
 }
 
 // ─── build header string ────────────────────────────────────────────────────
+// Header is built once per output file (not per-spectrum), so std::format's
+// per-call allocation is a non-issue here -- unlike SPECTRUM_TPL/render_spectrum
+// below, which are hand-rolled specifically to avoid that cost in a hot path.
+static constexpr char HEADER_XML_DECL[] = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
+
+static constexpr char HEADER_ROOT_INDEXED[] =
+    "<indexedmzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd\">\n"
+    "  <mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"{0}\" version=\"1.1.0\">\n";
+
+static constexpr char HEADER_ROOT_PLAIN[] =
+    "<mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"{0}\" version=\"1.1.0\">\n";
+
+static constexpr char HEADER_BODY_TPL[] =
+    "    <cvList count=\"2\">\n"
+    "      <cv id=\"MS\" fullName=\"Proteomics Standards Initiative Mass Spectrometry Ontology\" version=\"4.1.41\" URI=\"https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo\"/>\n"
+    "      <cv id=\"UO\" fullName=\"Unit Ontology\" version=\"09:04:2014\" URI=\"https://raw.githubusercontent.com/bio-ontology-research-group/unit-ontology/master/unit.obo\"/>\n"
+    "    </cvList>\n"
+    "    <fileDescription>\n"
+    "      <fileContent>\n"
+    "        <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n"
+    "        <cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n"
+    "      </fileContent>\n"
+    "      <sourceFileList count=\"1\">\n"
+    "        <sourceFile id=\"{0}.mgf\" name=\"{0}.mgf\" location=\"file:///\">\n"
+    "          <cvParam cvRef=\"MS\" accession=\"MS:1000774\" name=\"multiple peak list nativeID format\" value=\"\"/>\n"
+    "          <cvParam cvRef=\"MS\" accession=\"MS:1001062\" name=\"Mascot MGF format\" value=\"\"/>\n"
+    "        </sourceFile>\n"
+    "      </sourceFileList>\n"
+    "    </fileDescription>\n"
+    "    <softwareList count=\"1\">\n"
+    "      <software id=\"mgf_to_mzml_python\" version=\"1.0\">\n"
+    "        <cvParam cvRef=\"MS\" accession=\"MS:1000615\" name=\"ProteoWizard software\" value=\"\"/>\n"
+    "      </software>\n"
+    "    </softwareList>\n"
+    "    <instrumentConfigurationList count=\"1\">\n"
+    "      <instrumentConfiguration id=\"IC\">\n"
+    "        <cvParam cvRef=\"MS\" accession=\"MS:1000031\" name=\"instrument model\" value=\"\"/>\n"
+    "      </instrumentConfiguration>\n"
+    "    </instrumentConfigurationList>\n"
+    "    <dataProcessingList count=\"1\">\n"
+    "      <dataProcessing id=\"python_conversion\">\n"
+    "        <processingMethod order=\"0\" softwareRef=\"mgf_to_mzml_python\">\n"
+    "          <cvParam cvRef=\"MS\" accession=\"MS:1000544\" name=\"Conversion to mzML\" value=\"\"/>\n"
+    "        </processingMethod>\n"
+    "      </dataProcessing>\n"
+    "    </dataProcessingList>\n"
+    "    <run id=\"{0}\" defaultInstrumentConfigurationRef=\"IC\">\n"
+    "      <spectrumList count=\"{1}\" defaultDataProcessingRef=\"python_conversion\">\n";
+
 static std::string build_header(const std::string& run_id, size_t n_spectra, bool indexed) {
     std::string s;
     s.reserve(4096);
-    s += "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
-    if (indexed) {
-        s += "<indexedmzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd\">\n";
-        s += "  <mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"" + run_id + "\" version=\"1.1.0\">\n";
-    } else {
-        s += "<mzML xmlns=\"http://psi.hupo.org/ms/mzml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd\" id=\"" + run_id + "\" version=\"1.1.0\">\n";
-    }
-    s += "    <cvList count=\"2\">\n";
-    s += "      <cv id=\"MS\" fullName=\"Proteomics Standards Initiative Mass Spectrometry Ontology\" version=\"4.1.41\" URI=\"https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo\"/>\n";
-    s += "      <cv id=\"UO\" fullName=\"Unit Ontology\" version=\"09:04:2014\" URI=\"https://raw.githubusercontent.com/bio-ontology-research-group/unit-ontology/master/unit.obo\"/>\n";
-    s += "    </cvList>\n";
-    s += "    <fileDescription>\n";
-    s += "      <fileContent>\n";
-    s += "        <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n";
-    s += "        <cvParam cvRef=\"MS\" accession=\"MS:1000127\" name=\"centroid spectrum\" value=\"\"/>\n";
-    s += "      </fileContent>\n";
-    s += "      <sourceFileList count=\"1\">\n";
-    s += "        <sourceFile id=\"" + run_id + ".mgf\" name=\"" + run_id + ".mgf\" location=\"file:///\">\n";
-    s += "          <cvParam cvRef=\"MS\" accession=\"MS:1000774\" name=\"multiple peak list nativeID format\" value=\"\"/>\n";
-    s += "          <cvParam cvRef=\"MS\" accession=\"MS:1001062\" name=\"Mascot MGF format\" value=\"\"/>\n";
-    s += "        </sourceFile>\n";
-    s += "      </sourceFileList>\n";
-    s += "    </fileDescription>\n";
-    s += "    <softwareList count=\"1\">\n";
-    s += "      <software id=\"mgf_to_mzml_python\" version=\"1.0\">\n";
-    s += "        <cvParam cvRef=\"MS\" accession=\"MS:1000615\" name=\"ProteoWizard software\" value=\"\"/>\n";
-    s += "      </software>\n";
-    s += "    </softwareList>\n";
-    s += "    <instrumentConfigurationList count=\"1\">\n";
-    s += "      <instrumentConfiguration id=\"IC\">\n";
-    s += "        <cvParam cvRef=\"MS\" accession=\"MS:1000031\" name=\"instrument model\" value=\"\"/>\n";
-    s += "      </instrumentConfiguration>\n";
-    s += "    </instrumentConfigurationList>\n";
-    s += "    <dataProcessingList count=\"1\">\n";
-    s += "      <dataProcessing id=\"python_conversion\">\n";
-    s += "        <processingMethod order=\"0\" softwareRef=\"mgf_to_mzml_python\">\n";
-    s += "          <cvParam cvRef=\"MS\" accession=\"MS:1000544\" name=\"Conversion to mzML\" value=\"\"/>\n";
-    s += "        </processingMethod>\n";
-    s += "      </dataProcessing>\n";
-    s += "    </dataProcessingList>\n";
-    s += "    <run id=\"" + run_id + "\" defaultInstrumentConfigurationRef=\"IC\">\n";
-    char tmp[128];
-    snprintf(tmp, sizeof(tmp), "      <spectrumList count=\"%zu\" defaultDataProcessingRef=\"python_conversion\">\n", n_spectra);
-    s += tmp;
+    s += HEADER_XML_DECL;
+    s += std::vformat(indexed ? HEADER_ROOT_INDEXED : HEADER_ROOT_PLAIN, std::make_format_args(run_id));
+    s += std::format(HEADER_BODY_TPL, run_id, n_spectra);
     return s;
 }
 

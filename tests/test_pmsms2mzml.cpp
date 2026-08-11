@@ -445,6 +445,58 @@ int main() {
     // ── binary array assertions ───────────────────────────────────────────────
     verify_and_print_arrays(extract_arrays(xml));
 
+    // ── non-indexed (plain) mode ────────────────────────────────────────────────
+    // The pipeline's actual convert_search_pmsms_to_mzml rule never passes
+    // --indexed, so this is the mode real runs use -- same fixture, same
+    // expected content as the indexed run above, via the mmap multi-threaded
+    // writer + idmap.mmappet path instead.
+    fs::path out_plain = tmp / "output_plain.mzML";
+    std::string cmd_plain =
+        "./pmsms2mzml " + (tmp / "pmsms.mmappet").string() +
+        " " + (tmp / "precursors.mmappet").string() +
+        " " + out_plain.string() +
+        " --run-id plain_test --threads 1 --check-mz-sorted";
+
+    printf("\n=== Invoking non-indexed converter ===\n%s\n", cmd_plain.c_str());
+
+    if (system(cmd_plain.c_str()) != 0) {
+        fprintf(stderr, "pmsms2mzml non-indexed run exited with non-zero status\n");
+        return 1;
+    }
+
+    assert(fs::is_directory(out_plain));
+    assert(fs::exists(out_plain / "mzml.mzML"));
+    assert(fs::exists(out_plain / "idmap.mmappet" / "schema.txt"));
+    assert(fs::exists(out_plain / "idmap.mmappet" / "0.bin"));
+
+    std::string plain_xml = read_file(out_plain / "mzml.mzML");
+    assert(has(plain_xml, "spectrumList count=\"3\""));
+    assert(has(plain_xml, "defaultArrayLength=\"3\""));
+    assert(has(plain_xml, "defaultArrayLength=\"4\""));
+    assert(has(plain_xml, "name=\"charge state\" value=\"2\""));
+    assert(has(plain_xml, "name=\"charge state\" value=\"3\""));
+    assert(has(plain_xml, "name=\"selected ion m/z\" value=\"500.123\""));
+    assert(has(plain_xml, "name=\"selected ion m/z\" value=\"600.456\""));
+    assert(has(plain_xml, "name=\"selected ion m/z\" value=\"700.789\""));
+    assert(has(plain_xml, "name=\"scan start time\" value=\"60.0\""));
+    assert(has(plain_xml, "name=\"scan start time\" value=\"120.0\""));
+    assert(has(plain_xml, "name=\"scan start time\" value=\"180.0\""));
+    verify_and_print_arrays(extract_arrays(plain_xml));
+
+    // idmap.mmappet/0.bin: uint64 prec_idx per spectrum, in file write order.
+    // Single-threaded + no physical filtering => spectrum i is precursor i.
+    {
+        std::ifstream idmap_f(out_plain / "idmap.mmappet" / "0.bin", std::ios::binary);
+        uint64_t prec_idx[N_PREC];
+        idmap_f.read(reinterpret_cast<char*>(prec_idx), sizeof(prec_idx));
+        assert(idmap_f.gcount() == (std::streamsize)sizeof(prec_idx));
+        for (int i = 0; i < N_PREC; ++i) {
+            assert(prec_idx[i] == (uint64_t)i);
+        }
+        printf("idmap.mmappet: prec_idx = [%llu, %llu, %llu] OK\n",
+               (unsigned long long)prec_idx[0], (unsigned long long)prec_idx[1], (unsigned long long)prec_idx[2]);
+    }
+
     fs::path out_filtered = tmp / "output_filtered.mzML";
     std::string cmd_filtered =
         "./pmsms2mzml " + (tmp / "pmsms_filtered.mmappet").string() +
