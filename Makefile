@@ -1,4 +1,9 @@
+# Needs real C++23. Override with e.g. `make CXX=g++-14`; the pipeline's
+# top-level Makefile passes a compiler detected by scripts/detect_cxx23.sh.
+# GNU make predefines CXX=g++, so only substitute the default here.
+ifeq ($(origin CXX),default)
 CXX      := clang++
+endif
 CXXFLAGS := -std=c++23 -O3 -Wall -Isrc
 LDFLAGS  := -lz
 

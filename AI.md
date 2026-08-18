@@ -180,3 +180,15 @@ Verified: single-threaded and multi-threaded outputs are byte-identical on test 
 * avoid repetition but not at cost of too big abstraction.
 * keep simple
 * I will put tasks into AItodos folder. When we are done one task please move that text to AIdone folder and in Claude.nd do a summary of both the task and its final status.
+
+# Build: `CXX` is overridable
+
+`CXX` defaults to `clang++` but only when make's own default is still in place
+(`ifeq ($(origin CXX),default)` — a plain `?=` would not work, since GNU make
+predefines `CXX=g++`). Override with `make CXX=g++-14`; the pipeline's top-level
+Makefile passes a compiler chosen by `scripts/detect_cxx23.sh`.
+
+The `-std=c++23` in `CXXFLAGS` is a real requirement, and older distro compilers
+either reject the flag (clang 14 knows only `c++2b`) or accept it without
+implementing enough of the standard. See `git/ionmaidenmetal/AI.md` for the full
+compiler-support story — the same detection covers both tools.
