@@ -1,5 +1,7 @@
 CXX      := clang++
-CXXFLAGS := -std=c++23 -O3 -Wall -Isrc
+# -ffp-contract=off: fragment m/z read through --tof2mz must round exactly as SAGE's
+# reader does (no fused multiply-add), so exports hold the m/z SAGE searched.
+CXXFLAGS := -std=c++23 -O3 -Wall -Isrc -ffp-contract=off
 LDFLAGS  := -lz
 
 pmsms2mzml: main.o MSNumpress.o

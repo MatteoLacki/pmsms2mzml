@@ -79,6 +79,27 @@ tof[idx:idx+max_group_len]
 Columnar binary: `0.bin`..`3.bin` + `schema.txt`
 Schema: `uint32 tof, uint32 intensity, float32 score, float32 mz`
 
+### Fragment m/z through a tof2mz table: `--tof2mz <table.mmappet>` (2026-10)
+
+The pipeline's pmsms has no `mz` column (necromerge2
+`plans/exports_from_tof2mz_table.md`). With `--tof2mz`, fragment m/z is read from the
+pmsms' `tof` (uint32) column through the table's `mz` column (float32 raw, or float64
+recalibrated; held as `std::vector<double>`), divided per precursor by
+`1 + fragment_shift_ppm*1e-6` when the precursors schema has `float64
+fragment_shift_ppm`:
+
+    mz = (float)(table[tof] / divisor)
+
+That is exactly SAGE's pmsms reader arithmetic, so the mzML holds the m/z SAGE
+searched. On F9477, against writing from a materialized `mz` column: `--indexed`
+output byte-identical; directory mode (the pipeline's) identical spectrum by spectrum
+per precursor — that mode writes spectra in thread-completion order with the sequence
+number patched in, so even two runs of the same binary differ in order. `FragmentMz` (`main.cpp`) holds the choice; `render_spectrum` fills a per-thread
+buffer per spectrum on the tof path and reads the `mz` column in place otherwise
+(synthetic pmsms, which has no `tof`). A tof beyond the table is an error.
+The Makefile pins `-ffp-contract=off`: a fused multiply-add in `1 + shift*1e-6`
+(possible with `-march=native`) would round differently from SAGE.
+
 ### Fragment index: `pmsms.mmappet/dataindex.mmappet/`
 Schema: `uint64 ms1idx, uint64 size, uint64 idx, uint32 max_group_len, float32 avg_group_len`
 For precursor i: fragments at `main[idx[i] .. idx[i]+size[i]]`

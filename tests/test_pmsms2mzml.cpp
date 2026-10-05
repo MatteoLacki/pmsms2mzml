@@ -131,6 +131,51 @@ static void write_filtered_precursors(const fs::path& dir) {
     w.write_rows(2, pid, frame, scan, tof, iim, inten, mz, rt, charge, fstart, fcnt);
 }
 
+// tof2mz tables and shifted precursors for the `--tof2mz` path: frag_tof spans 0..9.
+static double tof2mz_f64[N_FRAG] = {100.123456789, 150.5, 200.000001, 250.25, 300.333333333,
+                                    350.75, 400.1, 450.987654321, 500.5, 550.0000004};
+static double prec_shift_ppm[N_PREC] = {1.5, -2.25, 0.0};
+
+static void write_tof2mz_table_f64(const fs::path& dir) {
+    Schema<double> s("mz");
+    auto w = s.create_writer(dir);
+    w.write_rows(N_FRAG, tof2mz_f64);
+}
+
+static void write_tof2mz_table_f32(const fs::path& dir) {
+    float table[N_FRAG];
+    for (int t = 0; t < N_FRAG; ++t) table[t] = (float)tof2mz_f64[t];
+    Schema<float> s("mz");
+    auto w = s.create_writer(dir);
+    w.write_rows(N_FRAG, table);
+}
+
+static void write_shifted_precursors(const fs::path& dir) {
+    Schema<int64_t, int32_t, int32_t, int32_t, double,
+           uint32_t, double, double, uint8_t, uint64_t, uint64_t, double>
+        s("precursor_id_before_deisotoping", "frame", "scan", "tof",
+          "inv_ion_mobility", "intensity", "mz", "rt", "charge",
+          "fragment_spectrum_start", "fragment_event_cnt", "fragment_shift_ppm");
+    auto w = s.create_writer(dir);
+    w.write_rows(N_PREC, prec_pid, prec_frame, prec_scan, prec_tof,
+                 prec_iim, prec_inten, prec_mz, prec_rt, prec_charge,
+                 prec_fstart, prec_fcnt, prec_shift_ppm);
+}
+
+// Fragment m/z SAGE's pmsms reader searches: table[tof] / (1 + shift*1e-6) in double,
+// rounded to float, for every fragment row of the fixture.
+static void expected_shifted_mz(float out[N_FRAG]) {
+    for (int p = 0; p < N_PREC; ++p)
+        for (uint64_t f = prec_fstart[p]; f < prec_fstart[p] + prec_fcnt[p]; ++f)
+            out[f] = (float)(tof2mz_f64[frag_tof[f]] / (1.0 + prec_shift_ppm[p] * 1e-6));
+}
+
+static void write_fragments_with_mz(const fs::path& dir, float mz[N_FRAG]) {
+    Schema<uint32_t, uint32_t, float, float> s("tof", "intensity", "score", "mz");
+    auto w = s.create_writer(dir);
+    w.write_rows(N_FRAG, frag_tof, frag_intensity, frag_score, mz);
+}
+
 // ── base64 + zlib helpers ────────────────────────────────────────────────────
 
 static std::vector<uint8_t> base64_decode(const std::string& in) {
@@ -540,6 +585,48 @@ int main() {
         fprintf(stderr, "pmsms2mzml Numpress dry-run exited with non-zero status\n");
         return 1;
     }
+
+    // ── --tof2mz: float64 table plus per-precursor fragment_shift_ppm ───────────
+    write_tof2mz_table_f64(tmp / "tof2mz_f64.mmappet");
+    write_tof2mz_table_f32(tmp / "tof2mz_f32.mmappet");
+    write_shifted_precursors(tmp / "precursors_shifted.mmappet");
+    float expected_mz[N_FRAG];
+    expected_shifted_mz(expected_mz);
+    write_fragments_with_mz(tmp / "pmsms_expected_mz.mmappet", expected_mz);
+
+    auto convert = [&](const fs::path& pmsms, const fs::path& precursors, const fs::path& out_path,
+                       const std::string& extra) {
+        std::string c = "./pmsms2mzml " + pmsms.string() + " " + precursors.string() + " " +
+                        out_path.string() + " --run-id tof2mz_test --threads 1 --indexed --check-mz-sorted" + extra;
+        printf("\n=== Invoking converter ===\n%s\n", c.c_str());
+        if (system(c.c_str()) != 0) {
+            fprintf(stderr, "pmsms2mzml exited with non-zero status\n");
+            exit(1);
+        }
+        return read_file(out_path);
+    };
+
+    std::string via_table = convert(tmp / "pmsms.mmappet", tmp / "precursors_shifted.mmappet",
+                                    tmp / "via_table.mzML", " --tof2mz " + (tmp / "tof2mz_f64.mmappet").string());
+    auto table_spectra = extract_arrays(via_table);
+    assert(table_spectra.size() == N_PREC);
+    for (int p = 0; p < N_PREC; ++p)
+        for (uint64_t j = 0; j < prec_fcnt[p]; ++j)
+            assert(table_spectra[p].mz[j] == expected_mz[prec_fstart[p] + j]);
+
+    // The same m/z read from an `mz` column (shift ignored there) gives the same file.
+    std::string via_column = convert(tmp / "pmsms_expected_mz.mmappet", tmp / "precursors_shifted.mmappet",
+                                     tmp / "via_column.mzML", "");
+    assert(via_column == via_table);
+
+    // A float32 table and no shift column is a plain lookup.
+    auto f32_spectra = extract_arrays(convert(tmp / "pmsms.mmappet", tmp / "precursors.mmappet",
+                                              tmp / "via_f32_table.mzML",
+                                              " --tof2mz " + (tmp / "tof2mz_f32.mmappet").string()));
+    for (int p = 0; p < N_PREC; ++p)
+        for (uint64_t j = 0; j < prec_fcnt[p]; ++j)
+            assert(f32_spectra[p].mz[j] == (float)tof2mz_f64[frag_tof[prec_fstart[p] + j]]);
+    printf("tof2mz tests passed.\n");
 
     printf("\ncharge test passed.\n");
     fs::remove_all(tmp);
