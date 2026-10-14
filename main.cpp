@@ -68,10 +68,10 @@ static int fmt_float_buf(char* buf, double val, int max_decimals = 6) {
 // 12-13: rt (6 dec), iim (4 dec)
 // 14-15: prec_mz (6 dec), charge
 // 16: mz_b64_len
-// 17: mz encoding cvParam line (varies: 32-bit float or numpress linear)
+// 17: mz encoding cvParam lines (32-bit float or numpress linear, then zlib or no compression)
 // 18: mz_b64_data
 // 19: int_b64_len
-// 20: int encoding cvParam line (varies: 32-bit float or numpress pic)
+// 20: int encoding cvParam lines (32-bit float or numpress pic, then zlib or no compression)
 // 21: int_b64_data
 static constexpr int SPECTRUM_N_SLOTS = 22;
 static const char SPECTRUM_TPL[] =
@@ -108,26 +108,28 @@ static const char SPECTRUM_TPL[] =
 "          <binaryDataArrayList count=\"2\">\n"
 "            <binaryDataArray encodedLength=\"{}\">\n"
 "{}"
-"              <cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n"
 "              <cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n"
 "              <binary>{}</binary>\n"
 "            </binaryDataArray>\n"
 "            <binaryDataArray encodedLength=\"{}\">\n"
 "{}"
-"              <cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n"
 "              <cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>\n"
 "              <binary>{}</binary>\n"
 "            </binaryDataArray>\n"
 "          </binaryDataArrayList>\n"
 "        </spectrum>\n";
 
-// Encoding cvParam lines (constant per run, selected by --numpress flag)
+// Encoding cvParam lines (constant per run, selected by --numpress and --no-compression)
 static const char CV_32BIT_FLOAT[] =
     "              <cvParam cvRef=\"MS\" accession=\"MS:1000521\" name=\"32-bit float\" value=\"\"/>\n";
 static const char CV_NUMPRESS_LINEAR[] =
     "              <cvParam cvRef=\"MS\" accession=\"MS:1002746\" name=\"MS-Numpress linear prediction compression\" value=\"\"/>\n";
 static const char CV_NUMPRESS_PIC[] =
     "              <cvParam cvRef=\"MS\" accession=\"MS:1002747\" name=\"MS-Numpress positive integer compression\" value=\"\"/>\n";
+static const char CV_ZLIB[] =
+    "              <cvParam cvRef=\"MS\" accession=\"MS:1000574\" name=\"zlib compression\" value=\"\"/>\n";
+static const char CV_NO_COMPRESSION[] =
+    "              <cvParam cvRef=\"MS\" accession=\"MS:1000576\" name=\"no compression\" value=\"\"/>\n";
 
 // Parsed template: fixed text segments between {} placeholders
 struct SpectrumTemplate {
@@ -195,6 +197,16 @@ static void zlib_compress_into(RenderBufs& bufs, const void* data, size_t len) {
     bufs.zlib_out.resize(s.total_out);
 }
 
+// base64 of `data`, zlib-compressed first unless the run writes uncompressed arrays.
+static void encode_array_into(RenderBufs& bufs, std::string& b64, const void* data, size_t len, bool use_zlib) {
+    if (!use_zlib) {
+        base64_encode_into(b64, (const uint8_t*)data, len);
+        return;
+    }
+    zlib_compress_into(bufs, data, len);
+    base64_encode_into(b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+}
+
 // ─── render one spectrum into bufs.output ───────────────────────────────────
 // Where fragment m/z comes from: the pmsms' own `mz` column, or `table[tof]`
 // divided by the precursor's `1 + fragment_shift_ppm*1e-6` in double and rounded to
@@ -220,6 +232,7 @@ static void render_spectrum(
     const char* run_id,
     size_t run_id_len,
     int zlib_level,
+    bool use_zlib,
     bool use_numpress,
     int max_decimals,
     const char* mz_enc_cv, size_t mz_enc_cv_len,
@@ -283,35 +296,31 @@ static void render_spectrum(
 
     if (use_numpress) {
         using namespace ms::numpress::MSNumpress;
-        // mz: float32 → double → numpress linear → zlib → base64
+        // mz: float32 → double → numpress linear → zlib (unless --no-compression) → base64
         bufs.mz_f64.resize(frag_count);
         for (uint64_t j = 0; j < frag_count; j++)
             bufs.mz_f64[j] = (double)mz_src[j];
         bufs.np_buf.resize(8 + frag_count * 5);
         double fp = optimalLinearFixedPoint(bufs.mz_f64.data(), frag_count);
         size_t np_len = encodeLinear(bufs.mz_f64.data(), frag_count, bufs.np_buf.data(), fp);
-        zlib_compress_into(bufs, bufs.np_buf.data(), np_len);
-        base64_encode_into(bufs.mz_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+        encode_array_into(bufs, bufs.mz_b64, bufs.np_buf.data(), np_len, use_zlib);
 
-        // intensity: u32 → double → numpress pic → zlib → base64
+        // intensity: u32 → double → numpress pic → zlib (unless --no-compression) → base64
         bufs.int_f64.resize(frag_count);
         for (uint64_t j = 0; j < frag_count; j++)
             bufs.int_f64[j] = (double)kept_int_at(j);
         bufs.np_buf.resize(frag_count * 5);
         np_len = encodePic(bufs.int_f64.data(), frag_count, bufs.np_buf.data());
-        zlib_compress_into(bufs, bufs.np_buf.data(), np_len);
-        base64_encode_into(bufs.int_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+        encode_array_into(bufs, bufs.int_b64, bufs.np_buf.data(), np_len, use_zlib);
     } else {
-        // mz: float32 → zlib → base64
-        zlib_compress_into(bufs, mz_src, frag_count * sizeof(float));
-        base64_encode_into(bufs.mz_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+        // mz: float32 → zlib (unless --no-compression) → base64
+        encode_array_into(bufs, bufs.mz_b64, mz_src, frag_count * sizeof(float), use_zlib);
 
-        // intensity: u32 → f32 → zlib → base64
+        // intensity: u32 → f32 → zlib (unless --no-compression) → base64
         bufs.int_f32.resize(frag_count);
         for (uint64_t j = 0; j < frag_count; j++)
             bufs.int_f32[j] = (float)kept_int_at(j);
-        zlib_compress_into(bufs, bufs.int_f32.data(), frag_count * sizeof(float));
-        base64_encode_into(bufs.int_b64, bufs.zlib_out.data(), bufs.zlib_out.size());
+        encode_array_into(bufs, bufs.int_b64, bufs.int_f32.data(), frag_count * sizeof(float), use_zlib);
     }
 
     // Format all scalar values
@@ -506,7 +515,7 @@ static std::vector<double> read_tof2mz_table(const std::filesystem::path& dir) {
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--run-id NAME] [--zlib-level N] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N] [--tof2mz TABLE]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--run-id NAME] [--zlib-level N] [--no-compression] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N] [--tof2mz TABLE]\n", argv[0]);
         return 1;
     }
 
@@ -518,6 +527,7 @@ int main(int argc, char** argv) {
     std::filesystem::path output_path = argv[3];
     std::string run_id = output_path.stem().string();
     int zlib_level = 1;
+    bool use_zlib = true;
     int thread_cnt = 1;
     bool dry_run = false;
     bool check_mz_sorted = false;
@@ -532,6 +542,8 @@ int main(int argc, char** argv) {
             run_id = argv[++i];
         } else if (strcmp(argv[i], "--zlib-level") == 0 && i + 1 < argc) {
             zlib_level = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--no-compression") == 0) {
+            use_zlib = false;
         } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             thread_cnt = atoi(argv[++i]);
             if (thread_cnt < 1) thread_cnt = 1;
@@ -551,6 +563,13 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--used-spectra-cnt") == 0 && i + 1 < argc) {
             used_spectra_cnt = (size_t)atol(argv[++i]);
         }
+    }
+
+    // The numpress cvParams written here (MS:1002746/MS:1002747) mean "numpress followed by
+    // zlib compression", so numpress without zlib would be mislabelled.
+    if (use_numpress && !use_zlib) {
+        fprintf(stderr, "ERROR: --numpress cannot be combined with --no-compression\n");
+        return 1;
     }
 
     // ─── Schema detection ────────────────────────────────────────────────
@@ -648,11 +667,14 @@ int main(int argc, char** argv) {
     const char* run_id_cstr = run_id.c_str();
     size_t run_id_len = run_id.size();
 
-    // Select encoding cvParam strings based on --numpress
-    const char* mz_enc_cv  = use_numpress ? CV_NUMPRESS_LINEAR : CV_32BIT_FLOAT;
-    size_t mz_enc_cv_len   = use_numpress ? sizeof(CV_NUMPRESS_LINEAR) - 1 : sizeof(CV_32BIT_FLOAT) - 1;
-    const char* int_enc_cv = use_numpress ? CV_NUMPRESS_PIC : CV_32BIT_FLOAT;
-    size_t int_enc_cv_len  = use_numpress ? sizeof(CV_NUMPRESS_PIC) - 1 : sizeof(CV_32BIT_FLOAT) - 1;
+    // Encoding cvParam lines: --numpress picks the encoding, --no-compression the compression
+    const std::string compression_cv = use_zlib ? CV_ZLIB : CV_NO_COMPRESSION;
+    const std::string mz_enc_cv_str  = (use_numpress ? CV_NUMPRESS_LINEAR : CV_32BIT_FLOAT) + compression_cv;
+    const std::string int_enc_cv_str = (use_numpress ? CV_NUMPRESS_PIC : CV_32BIT_FLOAT) + compression_cv;
+    const char* mz_enc_cv  = mz_enc_cv_str.data();
+    size_t mz_enc_cv_len   = mz_enc_cv_str.size();
+    const char* int_enc_cv = int_enc_cv_str.data();
+    size_t int_enc_cv_len  = int_enc_cv_str.size();
 
     // Optional: verify all spectra have m/z sorted in ascending order.
     if (check_mz_sorted) {
@@ -682,7 +704,7 @@ int main(int argc, char** argv) {
             for (size_t i = begin; i < end; i++) {
                 size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
-                    use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
+                    use_zlib, use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz, prec_mz_divisor_vec[pi], frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
@@ -743,7 +765,7 @@ int main(int argc, char** argv) {
             for (size_t i = begin; i < end; i++) {
                 size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, 0, pi, run_id_cstr, run_id_len, zlib_level,
-                    use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
+                    use_zlib, use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz, prec_mz_divisor_vec[pi], frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi],
@@ -840,7 +862,7 @@ int main(int argc, char** argv) {
             for (size_t i = begin; i < end; i++) {
                 size_t pi = effective_prec_idx[i];
                 render_spectrum(bufs, i, pi, run_id_cstr, run_id_len, zlib_level,
-                    use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
+                    use_zlib, use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz, prec_mz_divisor_vec[pi], frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
                     prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);

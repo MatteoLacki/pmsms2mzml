@@ -212,6 +212,12 @@ static std::vector<float> zlib_decompress_floats(const std::vector<uint8_t>& com
     return out;
 }
 
+static std::vector<float> raw_floats(const std::vector<uint8_t>& bytes) {
+    std::vector<float> out(bytes.size() / sizeof(float));
+    memcpy(out.data(), bytes.data(), out.size() * sizeof(float));
+    return out;
+}
+
 // ── mzML binary extraction ───────────────────────────────────────────────────
 
 struct SpectrumArrays { std::vector<float> mz, intensity; };
@@ -246,7 +252,9 @@ static std::vector<SpectrumArrays> extract_arrays(const std::string& xml) {
             std::string blk = spec.substr(a0, a1 - a0);
 
             std::string b64 = between(blk, "<binary>", "</binary>");
-            auto floats = zlib_decompress_floats(base64_decode(b64));
+            bool uncompressed = blk.find("accession=\"MS:1000576\"") != std::string::npos;
+            auto floats = uncompressed ? raw_floats(base64_decode(b64))
+                                       : zlib_decompress_floats(base64_decode(b64));
 
             if (blk.find("name=\"m/z array\"") != std::string::npos)
                 sa.mz = floats;
@@ -489,6 +497,30 @@ int main() {
 
     // ── binary array assertions ───────────────────────────────────────────────
     verify_and_print_arrays(extract_arrays(xml));
+
+    // ── --no-compression: same arrays, base64 of the raw floats ────────────────
+    fs::path out_uncompressed = tmp / "output_uncompressed.mzML";
+    std::string cmd_uncompressed =
+        "./pmsms2mzml " + (tmp / "pmsms.mmappet").string() +
+        " " + (tmp / "precursors.mmappet").string() +
+        " " + out_uncompressed.string() +
+        " --run-id uncompressed_test --threads 1 --indexed --no-compression";
+
+    printf("\n=== Invoking --no-compression converter ===\n%s\n", cmd_uncompressed.c_str());
+
+    if (system(cmd_uncompressed.c_str()) != 0) {
+        fprintf(stderr, "pmsms2mzml --no-compression run exited with non-zero status\n");
+        return 1;
+    }
+
+    std::string uncompressed_xml = read_file(out_uncompressed);
+    assert(has(uncompressed_xml, "accession=\"MS:1000576\" name=\"no compression\""));
+    assert(!has(uncompressed_xml, "MS:1000574"));
+    verify_and_print_arrays(extract_arrays(uncompressed_xml));
+
+    std::string cmd_numpress_uncompressed = cmd_uncompressed + " --numpress 2>/dev/null";
+    assert(system(cmd_numpress_uncompressed.c_str()) != 0 &&
+           "--numpress with --no-compression must be refused");
 
     // ── non-indexed (plain) mode ────────────────────────────────────────────────
     // The pipeline's actual convert_search_pmsms_to_mzml rule never passes

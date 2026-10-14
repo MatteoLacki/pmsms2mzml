@@ -73,6 +73,23 @@ tof[idx:idx+max_group_len]
 * Source: `src/MSNumpress.hpp` + `src/MSNumpress.cpp` (third-party, Apache 2.0).
 * Reference: `example/mzML_numpress.py`.
 
+## Uncompressed arrays: `--no-compression` (2026-10)
+* Writes each binary array as base64 of the raw bytes, with `MS:1000576` "no compression"
+  in place of `MS:1000574` "zlib compression". Refused together with `--numpress`:
+  the numpress accessions written (`MS:1002746`/`MS:1002747`) mean "numpress followed
+  by zlib compression" (PSI-MS CV; numpress alone is `MS:1002312`/`MS:1002313`), so
+  numpress without zlib would be mislabelled. For test inputs of SAGE's mzML reader (necromerge2
+  `plans/streaming_spectra.md`), which needs both flavours.
+* The compression cvParam now travels in template slots 17/20 with the encoding
+  cvParam, in the same order as before: default and `--numpress` output stayed
+  byte-identical to the previous binary on 5,000 F9477 spectra (indexed and directory
+  mode).
+* Known mislabelling, unchanged: `--numpress` writes `MS:1002746`/`MS:1002747` under
+  the plain numpress names and adds a separate `MS:1000574` zlib cvParam, so zlib is
+  declared twice. Fixing it changes the pipeline's mzML bytes (FragPipe input).
+* The Makefile's default `clang++` is not installed on every machine here: build with
+  `make CXX=g++`.
+
 ## Input files (mmappet format, no parquet dependency)
 
 ### Fragment data: `pmsms.mmappet/`
