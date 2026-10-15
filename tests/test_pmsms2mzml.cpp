@@ -408,6 +408,28 @@ static void run_charges_test() {
     assert(has(xml, "name=\"scan start time\" value=\"60.0\""));
     assert(has(xml, "name=\"scan start time\" value=\"120.0\""));
 
+    // ── --possible-charges: one spectrum per precursor, several charges listed ──
+    {
+        fs::path possible_out = tmp / "mc_possible.mzML";
+        std::string possible_cmd = cmd;
+        possible_cmd.replace(possible_cmd.find(out.string()), out.string().size(), possible_out.string());
+        possible_cmd += " --possible-charges";
+        printf("\n=== Invoking converter with --possible-charges ===\n%s\n", possible_cmd.c_str());
+        if (system(possible_cmd.c_str()) != 0) {
+            fprintf(stderr, "pmsms2mzml --possible-charges exited with non-zero status\n");
+            exit(1);
+        }
+        std::string possible_xml = read_file(possible_out);
+        assert(has(possible_xml, "spectrumList count=\"2\""));
+        assert(has(possible_xml, "accession=\"MS:1000633\" name=\"possible charge state\" value=\"2\""));
+        assert(has(possible_xml, "accession=\"MS:1000633\" name=\"possible charge state\" value=\"3\""));
+        // prec1 has one charge, written as a determined charge state.
+        assert(has(possible_xml, "name=\"charge state\" value=\"2\""));
+        assert(!has(possible_xml, "name=\"charge state\" value=\"3\""));
+        assert(extract_arrays(possible_xml).size() == 2);
+        printf("--possible-charges test passed.\n");
+    }
+
     // ── binary array assertions ───────────────────────────────────────────────
     auto spectra = extract_arrays(xml);
     assert(spectra.size() == 3);

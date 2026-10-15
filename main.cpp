@@ -66,7 +66,8 @@ static int fmt_float_buf(char* buf, double val, int max_decimals = 6) {
 //  9:   tic (1 dec)
 // 10-11: base_peak_mz (3 dec), base_peak_int (1 dec)
 // 12-13: rt (6 dec), iim (4 dec)
-// 14-15: prec_mz (6 dec), charge
+// 14: prec_mz (6 dec)
+// 15: charge cvParam line(s): one "charge state", or one "possible charge state" per charge
 // 16: mz_b64_len
 // 17: mz encoding cvParam lines (32-bit float or numpress linear, then zlib or no compression)
 // 18: mz_b64_data
@@ -98,7 +99,7 @@ static const char SPECTRUM_TPL[] =
 "              <selectedIonList count=\"1\">\n"
 "                <selectedIon>\n"
 "                  <cvParam cvRef=\"MS\" accession=\"MS:1000744\" name=\"selected ion m/z\" value=\"{}\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>\n"
-"                  <cvParam cvRef=\"MS\" accession=\"MS:1000041\" name=\"charge state\" value=\"{}\"/>\n"
+"{}"
 "                </selectedIon>\n"
 "              </selectedIonList>\n"
 "              <activation>\n"
@@ -118,6 +119,12 @@ static const char SPECTRUM_TPL[] =
 "            </binaryDataArray>\n"
 "          </binaryDataArrayList>\n"
 "        </spectrum>\n";
+
+// Charge cvParam lines: a determined charge, or each of several possible ones (MS:1000633)
+static const char CV_CHARGE_STATE_FMT[] =
+    "                  <cvParam cvRef=\"MS\" accession=\"MS:1000041\" name=\"charge state\" value=\"%u\"/>\n";
+static const char CV_POSSIBLE_CHARGE_FMT[] =
+    "                  <cvParam cvRef=\"MS\" accession=\"MS:1000633\" name=\"possible charge state\" value=\"%c\"/>\n";
 
 // Encoding cvParam lines (constant per run, selected by --numpress and --no-compression)
 static const char CV_32BIT_FLOAT[] =
@@ -245,6 +252,7 @@ static void render_spectrum(
     double rt,
     double prec_mz,
     uint8_t charge,
+    int64_t possible_charges,
     double iim,
     int index_width = 0)
 {
@@ -324,7 +332,7 @@ static void render_spectrum(
     }
 
     // Format all scalar values
-    char seq_s[32], idx_s[32], frag_s[32], charge_s[32], mz_b64l_s[32], int_b64l_s[32];
+    char seq_s[32], idx_s[32], frag_s[32], charge_s[2048], mz_b64l_s[32], int_b64l_s[32];
     char low_s[64], high_s[64], tic_s[64], bp_mz_s[64], bp_int_s[64];
     char rt_s[64], iim_s[64], prec_mz_s[64];
 
@@ -333,7 +341,16 @@ static void render_spectrum(
         : snprintf(seq_s, sizeof(seq_s), "%zu", seq_idx);
     int idx_n     = snprintf(idx_s, sizeof(idx_s), "%zu", prec_idx);
     int frag_n    = snprintf(frag_s, sizeof(frag_s), "%zu", (size_t)frag_count);
-    int charge_n  = snprintf(charge_s, sizeof(charge_s), "%u", (unsigned)charge);
+    int charge_n  = 0;
+    if (possible_charges > 0) {
+        // One decimal digit per possible charge, as the precursors' `charges` column encodes them.
+        char digits[24];
+        int n_digits = snprintf(digits, sizeof(digits), "%lld", (long long)possible_charges);
+        for (int d = 0; d < n_digits; d++)
+            charge_n += snprintf(charge_s + charge_n, sizeof(charge_s) - charge_n, CV_POSSIBLE_CHARGE_FMT, digits[d]);
+    } else {
+        charge_n = snprintf(charge_s, sizeof(charge_s), CV_CHARGE_STATE_FMT, (unsigned)charge);
+    }
     int mz_b64l_n = snprintf(mz_b64l_s, sizeof(mz_b64l_s), "%zu", bufs.mz_b64.size());
     int int_b64l_n= snprintf(int_b64l_s, sizeof(int_b64l_s), "%zu", bufs.int_b64.size());
     int low_n     = fmt_float_buf(low_s, lowest_mz, 3);
@@ -366,7 +383,7 @@ static void render_spectrum(
         {rt_s,      (size_t)rt_n},               // 12: rt
         {iim_s,     (size_t)iim_n},              // 13: iim
         {prec_mz_s, (size_t)prec_mz_n},         // 14: prec_mz
-        {charge_s,  (size_t)charge_n},           // 15: charge
+        {charge_s,  (size_t)charge_n},           // 15: charge cvParam line(s)
         {mz_b64l_s, (size_t)mz_b64l_n},         // 16: mz_b64_len
         {mz_enc_cv, mz_enc_cv_len},             // 17: mz encoding cvParam
         {bufs.mz_b64.data(),  bufs.mz_b64.size()},  // 18: mz_b64_data
@@ -515,7 +532,7 @@ static std::vector<double> read_tof2mz_table(const std::filesystem::path& dir) {
 int main(int argc, char** argv) {
     // Parse CLI args
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--run-id NAME] [--zlib-level N] [--no-compression] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N] [--tof2mz TABLE]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <pmsms_dir> <precursors_dir> <output.mzml> [--run-id NAME] [--zlib-level N] [--no-compression] [--possible-charges] [--threads N] [--decimals N] [--dry-run] [--check-mz-sorted] [--numpress] [--indexed] [--used-spectra-cnt N] [--tof2mz TABLE]\n", argv[0]);
         return 1;
     }
 
@@ -528,6 +545,7 @@ int main(int argc, char** argv) {
     std::string run_id = output_path.stem().string();
     int zlib_level = 1;
     bool use_zlib = true;
+    bool possible_charges_mode = false;
     int thread_cnt = 1;
     bool dry_run = false;
     bool check_mz_sorted = false;
@@ -544,6 +562,8 @@ int main(int argc, char** argv) {
             zlib_level = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-compression") == 0) {
             use_zlib = false;
+        } else if (strcmp(argv[i], "--possible-charges") == 0) {
+            possible_charges_mode = true;
         } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             thread_cnt = atoi(argv[++i]);
             if (thread_cnt < 1) thread_cnt = 1;
@@ -612,6 +632,8 @@ int main(int argc, char** argv) {
     std::vector<double>   prec_mz_divisor_vec;
     std::vector<size_t>   effective_prec_idx;
     std::vector<uint8_t>  effective_charge;
+    // Per spectrum: the precursor's `charges` code when written as possible charge states, else 0.
+    std::vector<int64_t>  effective_possible_charges;
 
     {
         auto prec_iim_col   = OpenColumn<double>  (precursors_dir, "inv_ion_mobility");
@@ -640,13 +662,23 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < n; i++) {
                 effective_prec_idx.push_back(i);
                 effective_charge.push_back(prec_charge_col[i]);
+                effective_possible_charges.push_back(0);
             }
         } else {
             auto prec_charges_col = OpenColumn<int64_t>(precursors_dir, "charges");
             for (size_t pi = 0; pi < n; pi++) {
-                for (uint8_t c : charges_from_int64(prec_charges_col[pi])) {
+                auto charges = charges_from_int64(prec_charges_col[pi]);
+                if (possible_charges_mode && charges.size() > 1) {
+                    // One spectrum listing every charge as possible (MS:1000633).
+                    effective_prec_idx.push_back(pi);
+                    effective_charge.push_back(0);
+                    effective_possible_charges.push_back(prec_charges_col[pi]);
+                    continue;
+                }
+                for (uint8_t c : charges) {
                     effective_prec_idx.push_back(pi);
                     effective_charge.push_back(c);
+                    effective_possible_charges.push_back(0);
                 }
             }
         }
@@ -707,7 +739,7 @@ int main(int argc, char** argv) {
                     use_zlib, use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz, prec_mz_divisor_vec[pi], frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
-                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
+                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], effective_possible_charges[i], prec_iim_vec[pi]);
                 total_bytes.fetch_add(bufs.output.size(), std::memory_order_relaxed);
 
                 size_t p = progress.fetch_add(1) + 1;
@@ -768,7 +800,7 @@ int main(int argc, char** argv) {
                     use_zlib, use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz, prec_mz_divisor_vec[pi], frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
-                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi],
+                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], effective_possible_charges[i], prec_iim_vec[pi],
                     index_width);
 
                 size_t sz = bufs.output.size();
@@ -865,7 +897,7 @@ int main(int argc, char** argv) {
                     use_zlib, use_numpress, max_decimals, mz_enc_cv, mz_enc_cv_len, int_enc_cv, int_enc_cv_len,
                     frag_mz, prec_mz_divisor_vec[pi], frag_int_data,
                     frag_start_vec[pi], frag_cnt_vec[pi],
-                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], prec_iim_vec[pi]);
+                    prec_rt_vec[pi], prec_mz_vec[pi], effective_charge[i], effective_possible_charges[i], prec_iim_vec[pi]);
 
                 res.offsets.push_back({i, res.wbuf.size()});
                 res.wbuf.append(bufs.output);

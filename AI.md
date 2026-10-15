@@ -90,6 +90,18 @@ tof[idx:idx+max_group_len]
 * The Makefile's default `clang++` is not installed on every machine here: build with
   `make CXX=g++`.
 
+## Multi-charge precursors as possible charge states: `--possible-charges` (2026-10)
+* Default (unchanged): a precursor whose `charges` lists several (e.g. 23) becomes one
+  spectrum per charge, each with `MS:1000041` "charge state".
+* `--possible-charges`: one spectrum per precursor; a multi-charge one carries one
+  `MS:1000633` "possible charge state" cvParam per charge (mzML's term for "one of
+  several candidates"); single-charge precursors keep `MS:1000041`. Off by default:
+  whether FragPipe/MSFragger reads `MS:1000633` is unchecked. SAGE reads it and pools
+  the charges (git/sage `docs/ai/multi_charge_precursors.md`).
+* The charge line is now template slot 15 as a whole; default, `--numpress` and
+  `--no-compression` output stayed byte-identical to `6247150` on 5,000 F9477
+  precursors (multi-charge expansion included).
+
 ## Input files (mmappet format, no parquet dependency)
 
 ### Fragment data: `pmsms.mmappet/`

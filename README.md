@@ -35,6 +35,7 @@ pmsms2mzml <pmsms_dir> <output> [options]
 | `--threads N` | Number of threads (default: 1) |
 | `--zlib-level N` | zlib compression level 1-9 (default: 1) |
 | `--no-compression` | Write binary arrays without zlib (`MS:1000576` instead of `MS:1000574`) |
+| `--possible-charges` | Write a precursor with several charges as one spectrum listing each as `MS:1000633` possible charge state (default: one spectrum per charge) |
 | `--decimals N` | Truncate m/z values to N decimal places |
 | `--indexed` | Produce indexed mzML (single file). Default is non-indexed |
 | `--numpress` | Use MS-Numpress compression for m/z and intensity arrays |
